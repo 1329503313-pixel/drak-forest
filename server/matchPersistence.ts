@@ -238,6 +238,55 @@ export function listLeaderboard(): Record<MatchMode, LeaderboardRow[]> {
   return out;
 }
 
+export type AccountListEntry = { gameAccountId: string } & AccountRow;
+
+export function listAllAccounts(): AccountListEntry[] {
+  const store = readStore();
+  return Object.entries(store.accounts)
+    .map(([gameAccountId, row]) => ({ gameAccountId, ...row }))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export function deleteAccountById(rawId: string): boolean {
+  const id = normalizeGameAccountId(rawId);
+  if (!id) return false;
+  const store = readStore();
+  if (!store.accounts[id]) return false;
+  delete store.accounts[id];
+  writeStore(store);
+  return true;
+}
+
+export function listAllMatchesAdmin(): StoredMatch[] {
+  const store = readStore();
+  return [...store.matches].sort((a, b) => b.endedAt - a.endedAt);
+}
+
+export function getMatchByIdAdmin(matchId: string): StoredMatch | null {
+  const store = readStore();
+  const m = store.matches.find((x) => x.matchId === matchId);
+  if (!m) return null;
+  const gridSize = m.gridSize ?? 15;
+  return {
+    ...m,
+    gridSize,
+    mapSizeLabel: m.mapSizeLabel ?? mapSizeLabel(gridSize),
+    matchMode: m.matchMode ?? "solo",
+    matchModeLabel: m.matchModeLabel ?? MATCH_MODE_CONFIGS[m.matchMode ?? "solo"].label,
+    rankings: Array.isArray(m.rankings) ? m.rankings : [],
+    replayLog: Array.isArray(m.replayLog) ? m.replayLog : [],
+  };
+}
+
+export function deleteMatchById(matchId: string): boolean {
+  const store = readStore();
+  const idx = store.matches.findIndex((m) => m.matchId === matchId);
+  if (idx < 0) return false;
+  store.matches.splice(idx, 1);
+  writeStore(store);
+  return true;
+}
+
 export function recordFinishedMatchIfNeeded(g: GameSession): void {
   if (g.phase !== "ended") return;
   const store = readStore();

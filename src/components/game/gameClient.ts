@@ -104,6 +104,14 @@ export function skillAoeKeys(
   if (skill === "sniper" || skill === "jump") {
     return new Set([cellKey(anchorCol, anchorRow)]);
   }
+  if (
+    skill === "shadow_clone" ||
+    skill === "nuke" ||
+    skill === "landmine" ||
+    skill === "sonic_radar"
+  ) {
+    return new Set([cellKey(anchorCol, anchorRow)]);
+  }
   return new Set();
 }
 
@@ -229,7 +237,7 @@ export function jetReachableKeys(
   return set;
 }
 
-/** 紧邻四格的敌人 socketId（用于斩首） */
+/** 以自身为中心 3×3（切比雪夫距离 ≤1）内的可斩首目标 */
 export function adjacentEnemyAt(
   state: GameClientState,
   myId: string,
@@ -238,24 +246,15 @@ export function adjacentEnemyAt(
 ): Map<string, { col: number; row: number }> {
   const m = new Map<string, { col: number; row: number }>();
   const me = state.players.find((p) => p.socketId === myId);
-  const dirs = [
-    [0, -1],
-    [0, 1],
-    [-1, 0],
-    [1, 0],
-  ];
-  for (const [dc, dr] of dirs) {
-    const c = meCol + dc!;
-    const r = meRow + dr!;
-    const hit = state.players.find(
-      (p) =>
-        !p.eliminated &&
-        p.socketId !== myId &&
-        ((state.teamSize ?? 1) <= 1 || p.teamId !== me?.teamId) &&
-        p.col === c &&
-        p.row === r
-    );
-    if (hit) m.set(hit.socketId, { col: c, row: r });
+  for (const p of state.players) {
+    if (p.eliminated || p.socketId === myId) continue;
+    if ((state.teamSize ?? 1) > 1 && p.teamId === me?.teamId) continue;
+    if (p.col == null || p.row == null) continue;
+    const dc = Math.abs(p.col - meCol);
+    const dr = Math.abs(p.row - meRow);
+    if (Math.max(dc, dr) <= 1) {
+      m.set(p.socketId, { col: p.col, row: p.row });
+    }
   }
   return m;
 }

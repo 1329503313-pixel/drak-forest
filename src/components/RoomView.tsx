@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ALLOWED_GRID_SIZES, mapSizeLabel } from "@/constants/mapSizes";
 import { MATCH_MODE_OPTIONS, matchModeConfig, teamIdForSlot, type MatchMode } from "@/constants/matchModes";
-import type { PlayerPublic, RoomState, SpectatorSeatPublic } from "@/types/room";
+import { DEFAULT_ROOM_GAME_SETTINGS } from "@/constants/roomGameDefaults";
+import { SKILL_CATALOG } from "@/constants/skillCatalog";
+import type { SkillId } from "@/types/game";
+import type { PlayerPublic, RoomGameSettings, RoomState, SpectatorSeatPublic } from "@/types/room";
 import { PlayerAvatarFrame } from "@/components/PlayerAvatarFrame";
 import { DEFAULT_AVATAR } from "@/utils/defaultAvatar";
 
@@ -20,6 +23,7 @@ type Props = {
   onSpectate?: () => void;
   onSetGridSize?: (size: number) => void;
   onSetMatchMode?: (mode: MatchMode) => void;
+  onSetGameSettings?: (patch: Partial<RoomGameSettings>) => void;
 };
 
 function buildSlotMap(state: RoomState): (PlayerPublic | null)[] {
@@ -62,12 +66,60 @@ export function RoomView({
   onSpectate,
   onSetGridSize,
   onSetMatchMode,
+  onSetGameSettings,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const isHost = state.hostId === myId;
   const slotMap = buildSlotMap(state);
   const spectatorRow = buildSpectatorSlotRow(state);
   const cfg = matchModeConfig(state.matchMode);
+  const gameSettings = useMemo(() => state.gameSettings ?? DEFAULT_ROOM_GAME_SETTINGS, [state.gameSettings]);
+  const gameSettingsSummary = useMemo(() => {
+    const g = gameSettings;
+    return `生命 ${g.initialHp}/${g.maxHp} · 体力 ${g.initialStamina}/${g.maxStamina} · 休息 +${g.restHp}/+${g.restStamina} · 攻击 ${g.attackDamage} · 可学技能 ${g.learnableSkillIds.length}/${SKILL_CATALOG.length}`;
+  }, [gameSettings]);
+
+  const patchGame = onSetGameSettings;
+  const clampInt = (n: number, lo: number, hi: number) => {
+    if (!Number.isFinite(n)) return lo;
+    return Math.max(lo, Math.min(hi, Math.floor(n)));
+  };
+
+  const setInitialHp = (raw: number) => {
+    if (!patchGame) return;
+    const initialHp = clampInt(raw, 1, 500);
+    let maxHp = gameSettings.maxHp;
+    if (initialHp > maxHp) maxHp = initialHp;
+    patchGame({ initialHp, maxHp });
+  };
+  const setMaxHp = (raw: number) => {
+    if (!patchGame) return;
+    const maxHp = Math.max(clampInt(raw, 1, 500), gameSettings.initialHp);
+    patchGame({ maxHp });
+  };
+  const setInitialStamina = (raw: number) => {
+    if (!patchGame) return;
+    const initialStamina = clampInt(raw, 0, 500);
+    let maxStamina = gameSettings.maxStamina;
+    if (initialStamina > maxStamina) maxStamina = initialStamina;
+    patchGame({ initialStamina, maxStamina });
+  };
+  const setMaxStamina = (raw: number) => {
+    if (!patchGame) return;
+    const maxStamina = Math.max(clampInt(raw, 0, 500), gameSettings.initialStamina);
+    patchGame({ maxStamina });
+  };
+  const setRestHp = (raw: number) => patchGame?.({ restHp: clampInt(raw, 0, 100) });
+  const setRestStamina = (raw: number) => patchGame?.({ restStamina: clampInt(raw, 0, 100) });
+  const setAttackDamage = (raw: number) => patchGame?.({ attackDamage: clampInt(raw, 1, 100) });
+  const toggleLearnSkill = (id: SkillId, next: boolean) => {
+    if (!patchGame) return;
+    const set = new Set(gameSettings.learnableSkillIds);
+    if (next) set.add(id);
+    else set.delete(id);
+    patchGame({ learnableSkillIds: [...set] as SkillId[] });
+  };
+
   const startBlockReason = (() => {
     if (state.players.length < 2) return `对战席至少需要 2 名玩家才能开始（最多 ${state.maxSlots} 人）`;
     if (cfg.mode === "solo") return null;
@@ -144,6 +196,8 @@ export function RoomView({
             </p>
             <p className="room-meta-line">
               对局类型：{state.matchModeLabel ?? cfg.label} · 地图：{state.mapSizeLabel ?? `${state.gridSize ?? 15}×${state.gridSize ?? 15}`}
+              <br />
+              <span className="room-meta-line__sub">{gameSettingsSummary}</span>
             </p>
             <div className="room-slots-wrap">
             <div className="room-seat-section-title">对战席</div>
@@ -391,6 +445,109 @@ export function RoomView({
                 </button>
               ))}
             </div>
+
+            <div className="room-map-picker" style={{ marginBottom: 8 }}>
+              <span className="room-map-picker__label">对局数值（上限不得低于初始；初始超过上限时会上调上限）</span>
+            </div>
+            <div className="room-game-settings">
+              <div className="room-game-settings__field">
+                <label htmlFor="gs-init-hp">初始生命</label>
+                <input
+                  id="gs-init-hp"
+                  type="number"
+                  min={1}
+                  max={500}
+                  value={gameSettings.initialHp}
+                  onChange={(e) => setInitialHp(Number(e.target.value))}
+                />
+              </div>
+              <div className="room-game-settings__field">
+                <label htmlFor="gs-max-hp">生命上限</label>
+                <input
+                  id="gs-max-hp"
+                  type="number"
+                  min={gameSettings.initialHp}
+                  max={500}
+                  value={gameSettings.maxHp}
+                  onChange={(e) => setMaxHp(Number(e.target.value))}
+                />
+              </div>
+              <div className="room-game-settings__field">
+                <label htmlFor="gs-init-stam">初始体力</label>
+                <input
+                  id="gs-init-stam"
+                  type="number"
+                  min={0}
+                  max={500}
+                  value={gameSettings.initialStamina}
+                  onChange={(e) => setInitialStamina(Number(e.target.value))}
+                />
+              </div>
+              <div className="room-game-settings__field">
+                <label htmlFor="gs-max-stam">体力上限</label>
+                <input
+                  id="gs-max-stam"
+                  type="number"
+                  min={gameSettings.initialStamina}
+                  max={500}
+                  value={gameSettings.maxStamina}
+                  onChange={(e) => setMaxStamina(Number(e.target.value))}
+                />
+              </div>
+              <div className="room-game-settings__field">
+                <label htmlFor="gs-rest-hp">休息恢复生命</label>
+                <input
+                  id="gs-rest-hp"
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={gameSettings.restHp}
+                  onChange={(e) => setRestHp(Number(e.target.value))}
+                />
+              </div>
+              <div className="room-game-settings__field">
+                <label htmlFor="gs-rest-stam">休息恢复体力</label>
+                <input
+                  id="gs-rest-stam"
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={gameSettings.restStamina}
+                  onChange={(e) => setRestStamina(Number(e.target.value))}
+                />
+              </div>
+              <div className="room-game-settings__field room-game-settings__field--full">
+                <label htmlFor="gs-atk">所有人攻击力</label>
+                <input
+                  id="gs-atk"
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={gameSettings.attackDamage}
+                  onChange={(e) => setAttackDamage(Number(e.target.value))}
+                />
+              </div>
+              <div className="room-game-settings__skills">
+                <span className="room-game-settings__skills-title">本局可随机到的技能（取消勾选则本局无法学到）</span>
+                {SKILL_CATALOG.map((s) => {
+                  const checked = gameSettings.learnableSkillIds.includes(s.id);
+                  return (
+                    <label key={s.id} className="room-game-settings__skill-row">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => toggleLearnSkill(s.id, e.target.checked)}
+                      />
+                      <span>
+                        <strong>{s.title}</strong>
+                        <span className="room-game-settings__skill-meta"> · {s.metaLine}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="modal-actions">
               <button type="button" className="btn-primary" onClick={() => setSettingsOpen(false)}>
                 完成

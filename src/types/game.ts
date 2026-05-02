@@ -10,7 +10,13 @@ export type SkillId =
   | "stealth"
   | "jet"
   | "jump"
-  | "execute";
+  | "execute"
+  | "shadow_clone"
+  | "golden_bell"
+  | "blade_escape"
+  | "nuke"
+  | "landmine"
+  | "sonic_radar";
 
 export type GamePlayerView = {
   socketId: string;
@@ -80,6 +86,14 @@ export type GameClientState = {
   matchMode?: MatchMode;
   matchModeLabel?: string;
   teamSize?: number;
+  /** 本局休息上限与普攻伤害（来自房间设置） */
+  gameRules?: {
+    maxHp: number;
+    maxStamina: number;
+    restHp: number;
+    restStamina: number;
+    attackDamage: number;
+  };
   roundNumber: number;
   /** 毒圈：仅 [margin, grid-1-margin]² 内可站立；偶数回合外圈消失并淘汰 */
   shrinkMargin?: number;
@@ -137,6 +151,21 @@ export type GameClientState = {
   replayLog?: GameReplayEntryView[];
   /** 已进入观战的人数（与对局内玩家共享） */
   watchingSpectatorCount?: number;
+  /** 核弹预警锚点格（全局可见） */
+  nukeWarningKeys?: string[];
+  /** 本人可见的同阵营地雷格 */
+  allyLandmineKeys?: string[];
+  /** 声波雷达锚点与侦测区格子 */
+  sonicRadarCells?: Array<{ id: string; col: number; row: number; hp: number; zoneKeys: string[] }>;
+  /** 影分身棋子（外观与主人一致） */
+  shadowClones?: Array<{
+    id: string;
+    col: number;
+    row: number;
+    ownerSocketId: string;
+    nickname: string;
+    avatar: string;
+  }>;
 };
 
 export type ClientGameAction =

@@ -1,6 +1,6 @@
 import express from "express";
 import { createServer } from "http";
-import { Server } from "socket.io";
+import { Server, type Socket } from "socket.io";
 import cors from "cors";
 import fs from "node:fs";
 import path from "node:path";
@@ -15,6 +15,7 @@ import {
   currentPlayerId,
   eliminatePlayerFromGame,
   isBotSocketId,
+  REPLAY_SYSTEM,
   rebindPlayerSocket,
   runPendingBeastTurn,
   timeoutCurrentTurn,
@@ -34,6 +35,12 @@ import {
 import { mapSizeLabel, normalizeGridSize, type AllowedGridSize } from "./mapConfig.js";
 import { matchModeConfig, normalizeMatchMode, type MatchMode } from "./matchModes.js";
 import { botAvatarDataUrl } from "./botAvatar.js";
+import { ensureDefaultAdmins } from "./adminAuthStore.js";
+import { mountAdminApi } from "./adminRoutes.js";
+import {
+  normalizeRoomGameSettings,
+  type RoomGameSettings,
+} from "./roomGameSettings.js";
 
 const MIN_PLAYERS_TO_START = 2;
 /** 大厅观战席固定数量 */
@@ -72,6 +79,8 @@ type Room = {
   /** 开局使用的地图边长（未开局时房主可改） */
   gridSize: AllowedGridSize;
   matchMode: MatchMode;
+  /** 开局数值与技能池（仅房主可改，开局前有效） */
+  gameSettings: RoomGameSettings;
   /** 电脑玩家 socketId -> 难度 */
   botDifficulties?: Map<string, BotDifficulty>;
   /** 中途加入的观战者（含未点「观战」的等待者） */
@@ -80,6 +89,9 @@ type Room = {
 
 const rooms = new Map<string, Room>();
 const games = new Map<string, GameSession>();
+
+/** 管理后台观战用的虚拟 viewerId（须不在 players 内） */
+const ADMIN_SPECTATOR_VIEWER_ID = "__admin_spectator__";
 
 function roomAvatarMap(room: Room): Map<string, string> {
   const m = new Map<string, string>();
@@ -94,6 +106,17 @@ function watchingSpectatorCount(room: Room): number {
     if (sp.watching) n++;
   }
   return n;
+}
+
+/** rooms 中已无该房间时移除绑定；常见于房间已解散但客户端仍持有旧 socket 映射 */
+function dropStaleRoomBinding(socket: Socket, code: string): void {
+  socketRoom.delete(socket.id);
+  socket.leave(code);
+}
+
+function notifyClientRoomGone(socket: Socket): void {
+  socket.emit("game:invalid", { message: "房间已失效，请返回首页" });
+  socket.emit("room:left");
 }
 
 function broadcastGameState(roomCode: string) {
@@ -230,6 +253,7 @@ function roomPayload(room: Room) {
     gameInProgress: games.has(room.code),
     gridSize: room.gridSize,
     mapSizeLabel: mapSizeLabel(room.gridSize),
+    gameSettings: room.gameSettings,
   };
 }
 
@@ -498,6 +522,73 @@ app.get("/api/match/:matchId", (req, res) => {
   res.json(detail);
 });
 
+function dissolveRoomByCode(code: string): boolean {
+  const room = rooms.get(code);
+  if (!room) return false;
+  dissolveRoom(room);
+  return true;
+}
+
+function forceEndGameByAdmin(roomCode: string): boolean {
+  const g = games.get(roomCode);
+  if (!g || g.phase !== "playing") return false;
+  appendReplayLog(g, REPLAY_SYSTEM, "管理员强制结束对局");
+  g.phase = "ended";
+  g.winnerId = null;
+  clearTurnTimer(roomCode);
+  recordFinishedMatchIfNeeded(g);
+  broadcastGameState(roomCode);
+  return true;
+}
+
+function getRoomsSnapshot() {
+  return [...rooms.values()].map((room) => roomPayload(room));
+}
+
+function getGamesSnapshot() {
+  return [...games.entries()].map(([code, g]) => ({
+    roomCode: code,
+    matchId: g.matchId,
+    phase: g.phase,
+    matchMode: g.matchMode,
+    matchModeLabel: g.matchModeLabel,
+    gridSize: g.gridSize,
+    roundNumber: g.roundNumber,
+    playerCount: g.players.size,
+    players: [...g.players.values()].map((p) => ({
+      socketId: p.socketId,
+      nickname: p.nickname,
+      gameAccountId: p.gameAccountId,
+      hp: p.hp,
+      isBot: isBotSocketId(p.socketId),
+    })),
+  }));
+}
+
+function getAdminGameState(roomCodeRaw: string): ReturnType<typeof buildGamePayload> | null {
+  const code = String(roomCodeRaw ?? "").replace(/\D/g, "").slice(0, 4);
+  if (code.length !== 4) return null;
+  const g = games.get(code);
+  if (!g || g.phase !== "playing") return null;
+  const room = rooms.get(code);
+  const av = room ? roomAvatarMap(room) : new Map<string, string>();
+  const ws = room ? watchingSpectatorCount(room) : 0;
+  return buildGamePayload(g, ADMIN_SPECTATOR_VIEWER_ID, {
+    spectatorMode: true,
+    roomAvatarBySocket: av,
+    watchingSpectatorCount: ws,
+  });
+}
+
+ensureDefaultAdmins();
+mountAdminApi(app, {
+  getRoomsSnapshot,
+  getGamesSnapshot,
+  getAdminGameState,
+  dissolveRoomByCode,
+  forceEndGame: forceEndGameByAdmin,
+});
+
 if (fs.existsSync(distDir)) {
   app.use(express.static(distDir));
   app.get("*", (_req, res) => {
@@ -639,6 +730,7 @@ io.on("connection", (socket) => {
         hostId: socket.id,
         gridSize,
         matchMode,
+        gameSettings: normalizeRoomGameSettings(undefined),
       };
       rooms.set(code, room);
       socket.join(code);
@@ -718,7 +810,12 @@ io.on("connection", (socket) => {
     const code = socketRoom.get(socket.id);
     if (!code) return;
     const room = rooms.get(code);
-    if (room?.spectators?.has(socket.id)) {
+    if (!room) {
+      dropStaleRoomBinding(socket, code);
+      socket.emit("room:left");
+      return;
+    }
+    if (room.spectators?.has(socket.id)) {
       room.spectators!.delete(socket.id);
       socket.leave(code);
       socketRoom.delete(socket.id);
@@ -731,10 +828,6 @@ io.on("connection", (socket) => {
       const left = eliminatePlayerFromGame(g, socket.id, { deathCause: "退出游戏" });
       if (left) io.to(code).emit("game:playerLeft", { nickname: left.nickname });
       broadcastGameState(code);
-    }
-    if (!room) {
-      socketRoom.delete(socket.id);
-      return;
     }
     const updated = removePlayerFromRoom(socket.id, room);
     socket.leave(code);
@@ -836,7 +929,9 @@ io.on("connection", (socket) => {
       }
       const room = rooms.get(code);
       if (!room) {
-        cb?.("房间不存在");
+        dropStaleRoomBinding(socket, code);
+        notifyClientRoomGone(socket);
+        cb?.("房间已失效，请重新加入房间");
         return;
       }
       const rp = room.players.get(socket.id);
@@ -1031,6 +1126,22 @@ io.on("connection", (socket) => {
     cb?.(null);
   });
 
+  socket.on("room:setGameSettings", (data: Partial<RoomGameSettings>, cb?: (err: string | null) => void) => {
+    const code = socketRoom.get(socket.id);
+    const room = code ? rooms.get(code) : undefined;
+    if (!code || !room || room.hostId !== socket.id) {
+      cb?.("仅房主可修改对局设置");
+      return;
+    }
+    if (games.has(code)) {
+      cb?.("游戏进行中无法修改");
+      return;
+    }
+    room.gameSettings = normalizeRoomGameSettings({ ...room.gameSettings, ...data });
+    broadcastRoom(room);
+    cb?.(null);
+  });
+
   socket.on("game:retireToLobby", (cb?: (err: string | null) => void) => {
     const code = socketRoom.get(socket.id);
     const g = code ? games.get(code) : undefined;
@@ -1089,7 +1200,7 @@ io.on("connection", (socket) => {
         },
       ])
     );
-    const created = createGameFromRoom(code, lite, room.gridSize, room.matchMode);
+    const created = createGameFromRoom(code, lite, room.gridSize, room.matchMode, room.gameSettings);
     if (!created) {
       cb?.("开局失败，请重试");
       return;
@@ -1114,6 +1225,12 @@ io.on("connection", (socket) => {
     const code = socketRoom.get(socket.id);
     if (!code) {
       cb?.("不在房间内");
+      return;
+    }
+    if (!rooms.has(code)) {
+      dropStaleRoomBinding(socket, code);
+      notifyClientRoomGone(socket);
+      cb?.("房间已失效，请重新加入");
       return;
     }
     const g = games.get(code);

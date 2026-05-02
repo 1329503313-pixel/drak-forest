@@ -248,3 +248,22 @@ export function cellsInRectCenter(
   }
   return out;
 }
+
+/** 切比雪夫距离 ≤ radius 的方形邻域（地图上常称「圆形」格区） */
+export function cellsInChebyshevDisk(
+  centerCol: number,
+  centerRow: number,
+  radius: number,
+  n: number
+): Array<{ col: number; row: number }> {
+  const out: Array<{ col: number; row: number }> = [];
+  for (let dc = -radius; dc <= radius; dc++) {
+    for (let dr = -radius; dr <= radius; dr++) {
+      if (Math.max(Math.abs(dc), Math.abs(dr)) > radius) continue;
+      const c = centerCol + dc;
+      const r = centerRow + dr;
+      if (inBounds(c, r, n)) out.push({ col: c, row: r });
+    }
+  }
+  return out;
+}

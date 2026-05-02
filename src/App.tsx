@@ -6,10 +6,11 @@ import { LeaderboardModal } from "@/components/LeaderboardModal";
 import { MatchHistoryModal } from "@/components/MatchHistoryModal";
 import { RoomView } from "@/components/RoomView";
 import { GameScreen } from "@/components/game/GameScreen";
+import { SKILL_CATALOG } from "@/constants/skillCatalog";
 import { ALLOWED_GRID_SIZES, mapSizeLabel, type AllowedGridSize } from "@/constants/mapSizes";
 import { MATCH_MODE_OPTIONS, type MatchMode } from "@/constants/matchModes";
 import type { GameClientState } from "@/types/game";
-import type { BotDifficulty, RoomState } from "@/types/room";
+import type { BotDifficulty, RoomState, RoomGameSettings } from "@/types/room";
 import { DEFAULT_AVATAR, normalizeAvatarUrl } from "@/utils/defaultAvatar";
 import { fileToAvatarDataUrl } from "@/utils/fileToAvatarDataUrl";
 import { randomFruitName } from "@/utils/fruits";
@@ -63,8 +64,11 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [skillsGuideOpen, setSkillsGuideOpen] = useState(false);
   const [activeGamePrompt, setActiveGamePrompt] = useState<{ roomCode: string; resumeToken: string } | null>(null);
   const activeGameCheckedForRef = useRef<string | null>(null);
+  /** 用于断线提示：是否在房间或局中（每帧刷新，disconnect 回调读取） */
+  const hadRoomOrGameRef = useRef(false);
 
   const resumeGame = useCallback((saved: { roomCode: string; resumeToken: string }) => {
     if (!socket.connected) return;
@@ -89,7 +93,11 @@ export default function App() {
     resumeGame(saved);
   }, [resumeGame]);
 
+  hadRoomOrGameRef.current = Boolean(room || gameState);
+
   useEffect(() => {
+    let playerLeftClearTimer: number | null = null;
+
     const onConnect = () => {
       setMyId(socket.id || "");
       tryResumeGame();
@@ -145,8 +153,20 @@ export default function App() {
       }
     };
     const onGamePlayerLeft = (p: { nickname: string }) => {
+      if (playerLeftClearTimer) window.clearTimeout(playerLeftClearTimer);
       setGameLeaveNotice(`${p.nickname} 离开了游戏`);
-      window.setTimeout(() => setGameLeaveNotice(null), 5200);
+      playerLeftClearTimer = window.setTimeout(() => {
+        playerLeftClearTimer = null;
+        setGameLeaveNotice(null);
+      }, 5200);
+    };
+    const onDisconnect = () => {
+      if (hadRoomOrGameRef.current) {
+        setToast("连接中断，正在尝试重连…");
+      }
+    };
+    const onConnectError = () => {
+      setToast("无法连接服务器，请检查网络");
     };
     socket.on("connect", onConnect);
     socket.on("room:state", onRoomState);
@@ -157,6 +177,8 @@ export default function App() {
     socket.on("room:kicked", onKicked);
     socket.on("game:state", onGameState);
     socket.on("game:playerLeft", onGamePlayerLeft);
+    socket.on("disconnect", onDisconnect);
+    socket.on("connect_error", onConnectError);
     if (socket.connected) {
       setMyId(socket.id || "");
       tryResumeGame();
@@ -171,6 +193,9 @@ export default function App() {
       socket.off("room:kicked", onKicked);
       socket.off("game:state", onGameState);
       socket.off("game:playerLeft", onGamePlayerLeft);
+      socket.off("disconnect", onDisconnect);
+      socket.off("connect_error", onConnectError);
+      if (playerLeftClearTimer) window.clearTimeout(playerLeftClearTimer);
     };
   }, [socket, tryResumeGame]);
 
@@ -190,7 +215,7 @@ export default function App() {
         if (payload) setActiveGamePrompt(payload);
       }
     );
-  }, [loggedInAccountId, sessionReady, socket, myId, gameState]);
+  }, [loggedInAccountId, sessionReady, socket, gameState]);
 
   useEffect(() => {
     if (!toast) return;
@@ -339,6 +364,15 @@ export default function App() {
   const setMatchModeForRoom = useCallback(
     (mode: MatchMode) => {
       socket.emit("room:setMatchMode", mode, (err: string | null) => {
+        if (err) setToast(err);
+      });
+    },
+    [socket]
+  );
+
+  const setGameSettingsForRoom = useCallback(
+    (patch: Partial<RoomGameSettings>) => {
+      socket.emit("room:setGameSettings", patch, (err: string | null) => {
         if (err) setToast(err);
       });
     },
@@ -503,6 +537,12 @@ export default function App() {
           <div className="home-hub__vignette" />
         </div>
 
+        {!room ? (
+          <a className="home-hub__admin-corner" href="/admin">
+            管理后台
+          </a>
+        ) : null}
+
         <header className="home-hub__top">
           <button
             type="button"
@@ -556,9 +596,14 @@ export default function App() {
             <p className="home-hub__lede">
               危机四伏的迷雾中，你是猎人也是猎物。有限的视野、未知的坐标——隐藏自己，猎杀目标，站到最后。
             </p>
-            <button type="button" className="home-hub__rules" onClick={() => setRulesOpen(true)}>
-              游戏规则
-            </button>
+            <div className="home-hub__hero-actions">
+              <button type="button" className="home-hub__rules" onClick={() => setRulesOpen(true)}>
+                游戏规则
+              </button>
+              <button type="button" className="home-hub__rules home-hub__rules--secondary" onClick={() => setSkillsGuideOpen(true)}>
+                技能介绍
+              </button>
+            </div>
           </section>
 
           <nav className="home-hub__nav" aria-label="首页功能">
@@ -640,6 +685,31 @@ export default function App() {
 
       <LeaderboardModal open={leaderboardOpen} onClose={() => setLeaderboardOpen(false)} />
 
+      {skillsGuideOpen && (
+        <div className="overlay" role="dialog" aria-modal="true" onClick={() => setSkillsGuideOpen(false)}>
+          <div className="modal modal--skills" onClick={(e) => e.stopPropagation()}>
+            <h3>技能介绍</h3>
+            <p className="modal-hint" style={{ marginTop: -4 }}>
+              以下为当前版本全部技能；消耗、冷却与效果以局内实际判定为准。
+            </p>
+            <div className="skills-guide-list">
+              {SKILL_CATALOG.map((entry) => (
+                <article key={entry.id} className="skills-guide-item">
+                  <h4 className="skills-guide-item__title">{entry.title}</h4>
+                  <p className="skills-guide-item__meta">{entry.metaLine}</p>
+                  <p className="skills-guide-item__effect">{entry.effect}</p>
+                </article>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="btn-secondary" onClick={() => setSkillsGuideOpen(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {rulesOpen && (
         <div className="overlay" role="dialog" aria-modal="true" onClick={() => setRulesOpen(false)}>
           <div className="modal modal--rules" onClick={(e) => e.stopPropagation()}>
@@ -656,7 +726,7 @@ export default function App() {
               <p>（4）每位玩家初始拥有10点生命值，生命值归0则淘汰出局。</p>
               <p>（5）地图上将随机出现天灾、怪物等各种随机事件，请小心谨慎。</p>
               <h4>每回合可以选择的操作有：</h4>
-              <p>1.攻击：对指定一个格子发起进攻，消耗其3点生命值，消耗自身2点体力。（单回合攻击、防御和技能只能选择一项）</p>
+              <p>1.攻击：对指定一个格子发起进攻，消耗其3点生命值，消耗自身2点体力。（单回合攻击、休息、技能只能选择一项）</p>
               <p>2.移动：可沿水平、垂直移动，每移动一格消耗1体力。</p>
               <p>3.休息：本回合恢复3点体力或1生命。（选择休息则无法选择其他任何选项，也无法移动）</p>
               <p>4.学习：消耗3体力，随机学习一项技能，最多同时拥有5项技能，满5项后需选择遗忘方可继续学习。每回合最多学习两次。</p>
@@ -880,6 +950,7 @@ export default function App() {
           onSpectate={enterSpectate}
           onSetGridSize={setGridSizeForRoom}
           onSetMatchMode={setMatchModeForRoom}
+          onSetGameSettings={setGameSettingsForRoom}
         />
       )}
     </div>

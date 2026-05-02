@@ -26,6 +26,12 @@ export const SKILL_IDS = [
   "jet",
   "jump",
   "execute",
+  "shadow_clone",
+  "golden_bell",
+  "blade_escape",
+  "nuke",
+  "landmine",
+  "sonic_radar",
 ] as const;
 
 export type SkillId = (typeof SKILL_IDS)[number];
@@ -44,6 +50,12 @@ export const SKILL_META: Record<
   jet: { name: "喷射器", cost: 3, cooldown: 1 },
   jump: { name: "空间跳跃", cost: 5, cooldown: 2 },
   execute: { name: "斩首", cost: 5, cooldown: 2 },
+  shadow_clone: { name: "影分身", cost: 4, cooldown: 4 },
+  golden_bell: { name: "金钟罩", cost: 4, cooldown: 3 },
+  blade_escape: { name: "名刀司命", cost: 0, cooldown: 0 },
+  nuke: { name: "核弹", cost: 6, cooldown: 3 },
+  landmine: { name: "地雷", cost: 2, cooldown: 1 },
+  sonic_radar: { name: "声波雷达", cost: 4, cooldown: 4 },
 };
 
 export const ALL_SKILLS_POOL: SkillId[] = [...SKILL_IDS];

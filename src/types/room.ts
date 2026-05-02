@@ -1,6 +1,19 @@
 import type { MatchMode } from "@/constants/matchModes";
+import type { SkillId } from "@/types/game";
 
 export type BotDifficulty = "easy" | "medium" | "hard";
+
+/** 与服务器 roomGameSettings 对齐；开局前房主配置 */
+export type RoomGameSettings = {
+  initialHp: number;
+  initialStamina: number;
+  maxHp: number;
+  maxStamina: number;
+  restHp: number;
+  restStamina: number;
+  attackDamage: number;
+  learnableSkillIds: SkillId[];
+};
 
 export type PlayerPublic = {
   socketId: string;
@@ -40,6 +53,8 @@ export type RoomState = {
   mapSizeLabel?: string;
   /** 服务端：当前是否有进行中的对局 */
   gameInProgress?: boolean;
+  /** 开局参数（全员同步） */
+  gameSettings?: RoomGameSettings;
   /** 加入时若对局进行中，先以访客进房，需点「观战」 */
   waitingToSpectate?: boolean;
 };

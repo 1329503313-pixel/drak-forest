@@ -36,10 +36,21 @@ import {
 } from "./gameClient";
 
 const MOVE_STEP_MS = 115;
-const MAX_VITAL_VALUE = 10;
 const MAX_SKILL_COUNT = 5;
 
-const SKILL_WITH_AIM_DELAY: SkillId[] = ["missile", "burn", "flare", "sniper", "jump"];
+const PASSIVE_SKILLS: SkillId[] = ["blade_escape"];
+
+const SKILL_WITH_AIM_DELAY: SkillId[] = [
+  "missile",
+  "burn",
+  "flare",
+  "sniper",
+  "jump",
+  "shadow_clone",
+  "nuke",
+  "landmine",
+  "sonic_radar",
+];
 const EVENT_LABELS = {
   volcano: "火山喷发",
   earthquake: "地震",
@@ -120,6 +131,12 @@ export function GameScreen({
   }, [state.replayLog]);
   const visible = useMemo(() => new Set(state.visibleCells), [state.visibleCells]);
   const me = state.players.find((p) => p.socketId === myId);
+  const gr = state.gameRules;
+  const maxHpCap = gr?.maxHp ?? 10;
+  const maxStaminaCap = gr?.maxStamina ?? 10;
+  const restHpAmt = gr?.restHp ?? 1;
+  const restStaminaAmt = gr?.restStamina ?? 3;
+  const attackDmg = gr?.attackDamage ?? ATTACK_DAMAGE;
   const tf = state.turnFlags ?? {
     didAttack: false,
     learnCount: 0,
@@ -342,6 +359,24 @@ export function GameScreen({
     return jetReachableKeys(meCol, meRow, n, blocked);
   }, [meOk, meCol, meRow, n, blocked]);
 
+  /** 斩首：以自身为中心的 3×3 可点范围（与服务器切比雪夫 ≤1 一致） */
+  const executeRangeKeys = useMemo(() => {
+    if (!meOk) return new Set<string>();
+    const s = new Set<string>();
+    for (let dc = -1; dc <= 1; dc++) {
+      for (let dr = -1; dr <= 1; dr++) {
+        const c = meCol + dc;
+        const r = meRow + dr;
+        if (!inBounds(c, r, n)) continue;
+        const k = cellKey(c, r);
+        if (wallSet.has(k)) continue;
+        if (!inPlayableArea(c, r, n, shrinkM)) continue;
+        s.add(k);
+      }
+    }
+    return s;
+  }, [meOk, meCol, meRow, n, shrinkM, wallSet]);
+
   const adjEnemy = useMemo(
     () => (meOk ? adjacentEnemyAt(state, myId, meCol, meRow) : new Map()),
     [meOk, state, myId, meCol, meRow]
@@ -377,6 +412,23 @@ export function GameScreen({
     () => new Set(state.burningCellKeys ?? []),
     [state.burningCellKeys]
   );
+
+  const nukeWarnSet = useMemo(() => new Set(state.nukeWarningKeys ?? []), [state.nukeWarningKeys]);
+  const allyMineSet = useMemo(() => new Set(state.allyLandmineKeys ?? []), [state.allyLandmineKeys]);
+  const sonicZoneSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of state.sonicRadarCells ?? []) {
+      for (const k of r.zoneKeys) s.add(k);
+    }
+    return s;
+  }, [state.sonicRadarCells]);
+  const sonicAnchorSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of state.sonicRadarCells ?? []) {
+      s.add(cellKey(r.col, r.row));
+    }
+    return s;
+  }, [state.sonicRadarCells]);
 
   const cellSelfClass = (col: number, row: number) => {
     if (!meOk || col !== meCol || row !== meRow) return "";
@@ -475,7 +527,9 @@ export function GameScreen({
     !tf.didAttack &&
     (tf.skillIdsUsed?.length ?? 0) < 2 &&
     !tf.didRest;
+  const canRestByRules = restHpAmt > 0 || restStaminaAmt > 0;
   const canRestBase =
+    canRestByRules &&
     !tf.didMove &&
     !tf.didAttack &&
     tf.learnCount === 0 &&
@@ -485,18 +539,29 @@ export function GameScreen({
   const mySkills = (me?.skills ?? []) as SkillId[];
   const cd = state.mySkillCooldowns ?? {};
 
+  const skillStaminaNeeded = useCallback(
+    (sk: SkillId): number => {
+      const meta = state.skillMeta[sk];
+      if (!meta) return 999;
+      if (sk !== "landmine") return meta.cost;
+      const usedLandmines = (tf.skillIdsUsed as SkillId[]).filter((x) => x === "landmine").length;
+      return usedLandmines >= 1 ? 3 : meta.cost;
+    },
+    [state.skillMeta, tf.skillIdsUsed]
+  );
+
   const skillUsable = useCallback(
     (sk: SkillId): boolean => {
+      if (PASSIVE_SKILLS.includes(sk)) return false;
       if (!me || mySkills.indexOf(sk) < 0) return false;
       if ((cd[sk] ?? 0) > 0) return false;
-      const meta = state.skillMeta[sk];
-      if (!meta) return false;
-      if ((me.stamina ?? 0) < meta.cost) return false;
+      if (!state.skillMeta[sk]) return false;
+      if ((me.stamina ?? 0) < skillStaminaNeeded(sk)) return false;
       if (!canSkillTree) return false;
       if ((tf.skillIdsUsed as SkillId[]).includes(sk)) return false;
       return true;
     },
-    [me, mySkills, cd, state.skillMeta, canSkillTree, tf.skillIdsUsed]
+    [me, mySkills, cd, state.skillMeta, canSkillTree, tf.skillIdsUsed, skillStaminaNeeded]
   );
 
   const endTurn = () => emitAction({ kind: "endTurn" }, { onOkMsg: "已结束回合" });
@@ -528,7 +593,8 @@ export function GameScreen({
 
   const tryRestMode = () => {
     if (!canRestBase) {
-      if (tf.didRest) onActionError("本回合已休息");
+      if (!canRestByRules) onActionError("本局规则下休息无法恢复生命或体力");
+      else if (tf.didRest) onActionError("本回合已休息");
       else if (tf.didMove) onActionError("已移动过，本回合无法休息");
       else if (tf.didAttack) onActionError("已攻击过，本回合无法休息");
       else if (tf.learnCount > 0) onActionError("已学习过，本回合无法休息");
@@ -540,7 +606,7 @@ export function GameScreen({
   };
 
   const restHp = () => {
-    if ((me?.hp ?? 0) >= MAX_VITAL_VALUE) {
+    if ((me?.hp ?? 0) >= maxHpCap) {
       onActionError("生命已达上限，无法恢复");
       return;
     }
@@ -548,7 +614,7 @@ export function GameScreen({
   };
 
   const restStamina = () => {
-    if ((me?.stamina ?? 0) >= MAX_VITAL_VALUE) {
+    if ((me?.stamina ?? 0) >= maxStaminaCap) {
       onActionError("体力已达上限，无法恢复");
       return;
     }
@@ -800,7 +866,7 @@ export function GameScreen({
           ([, pos]) => pos.col === col && pos.row === row
         )?.[0];
         if (!tid) {
-          onActionError("请选择紧邻的敌人");
+          onActionError("请选择以自身为中心的 3×3 范围内的敌人");
           return;
         }
         emitAction(
@@ -843,6 +909,10 @@ export function GameScreen({
     emitAction({ kind: "skill", skillId: "stealth", payload: {} }, { onOkMsg: "进入隐身状态" });
   };
 
+  const fireGoldenBell = () => {
+    emitAction({ kind: "skill", skillId: "golden_bell", payload: {} }, { onOkMsg: "金钟罩已开启" });
+  };
+
   const saveReplayImage = async () => {
     if (!state.replayLog?.length) return;
     setReplaySaving(true);
@@ -881,6 +951,10 @@ export function GameScreen({
     if (isBeast) c += " game-screen__cell--beast-zone";
     if (beastDamageKeys.has(key)) c += " game-screen__cell--beast-damage";
     if (!isWall && !isVoid && burningSet.has(key)) c += " game-screen__cell--burning";
+    if (!isWall && !isVoid && nukeWarnSet.has(key)) c += " game-screen__cell--nuke-warn";
+    if (!isWall && !isVoid && allyMineSet.has(key)) c += " game-screen__cell--landmine-ally";
+    if (!isWall && !isVoid && sonicZoneSet.has(key)) c += " game-screen__cell--sonic-zone";
+    if (!isWall && !isVoid && sonicAnchorSet.has(key)) c += " game-screen__cell--sonic-anchor";
 
     if (laserFx && laserFx.pulseIdx > 0) {
       const shown = laserFx.keys.slice(0, laserFx.pulseIdx);
@@ -910,14 +984,19 @@ export function GameScreen({
       const sk = uiMode.skill;
       if (sk === "jet" && jetKeys.has(key)) c += " game-screen__cell--hint";
       else if (sk === "execute") {
-        const hit = [...adjEnemy.values()].some((p) => p.col === col && p.row === row);
-        if (hit) c += " game-screen__cell--hint";
+        const hitEnemy = [...adjEnemy.values()].some((p) => p.col === col && p.row === row);
+        if (hitEnemy) c += " game-screen__cell--hint";
+        else if (executeRangeKeys.has(key)) c += " game-screen__cell--hint-soft";
       } else if (
         sk === "missile" ||
         sk === "sniper" ||
         sk === "flare" ||
         sk === "burn" ||
-        sk === "jump"
+        sk === "jump" ||
+        sk === "shadow_clone" ||
+        sk === "nuke" ||
+        sk === "landmine" ||
+        sk === "sonic_radar"
       ) {
         if (inBounds(col, row, n) && inPlayableArea(col, row, n, shrinkM) && !wallSet.has(key))
           c += " game-screen__cell--hint-soft";
@@ -950,9 +1029,9 @@ export function GameScreen({
     setAttackConfirm(null);
     let msg = "已发动攻击（该格无敌人）";
     if (targets.length === 1) {
-      msg = `命中 ${targets[0]!.nickname}，造成 ${ATTACK_DAMAGE} 点伤害`;
+      msg = `命中 ${targets[0]!.nickname}，造成 ${attackDmg} 点伤害`;
     } else if (targets.length > 1) {
-      msg = `命中 ${targets.map((t) => t.nickname).join("、")}，各造成 ${ATTACK_DAMAGE} 点伤害`;
+      msg = `命中 ${targets.map((t) => t.nickname).join("、")}，各造成 ${attackDmg} 点伤害`;
     }
     emitAction({ kind: "attack", col, row }, { onOkMsg: msg });
   };
@@ -1114,7 +1193,7 @@ export function GameScreen({
               你确定对 <strong>{attackConfirm.label}</strong> 发起攻击吗？
             </p>
             <p className="game-screen__confirm-hint">
-              将消耗 2 点体力；仅当格内有敌对玩家或巨兽时造成伤害，空格为挥空。
+              将消耗 2 点体力；仅当格内有敌对玩家或巨兽时造成 {attackDmg} 点伤害，空格为挥空。
             </p>
             <div className="game-screen__confirm-actions">
               <button type="button" className="btn-secondary" onClick={() => setAttackConfirm(null)}>
@@ -1219,14 +1298,17 @@ export function GameScreen({
                     animActor &&
                     !animActor.eliminated
                 );
+              const decoysHere = (state.shadowClones ?? []).filter((d) => d.col === col && d.row === row);
 
               const fogOk =
                 !fog ||
                 (uiMode.t === "skillTarget" &&
-                  (["missile", "sniper", "flare", "burn", "jump"].includes(uiMode.skill) ||
+                  (["missile", "sniper", "flare", "burn", "jump", "shadow_clone", "nuke", "landmine", "sonic_radar"].includes(
+                    uiMode.skill
+                  ) ||
                     (uiMode.skill === "jet" && jetKeys.has(key)) ||
                     (uiMode.skill === "execute" &&
-                      [...adjEnemy.values()].some((p) => p.col === col && p.row === row)))) ||
+                      executeRangeKeys.has(key)))) ||
                 isBeast ||
                 (uiMode.t === "attack" && attackKeys.has(key)) ||
                 (uiMode.t === "move" && reachableKeys.has(key));
@@ -1268,6 +1350,11 @@ export function GameScreen({
                       🔥
                     </span>
                   )}
+                  {!isWall && !isVoid && allyMineSet.has(key) && (
+                    <span className="game-screen__mine-icon" aria-hidden>
+                      💣
+                    </span>
+                  )}
                   {!hideCoord && (
                     <span
                       className={
@@ -1277,13 +1364,13 @@ export function GameScreen({
                       {`${colLetter(col)}${row + 1}`}
                     </span>
                   )}
-                  {(displayHere.length > 0 || showAnimActor) && (
+                  {(displayHere.length > 0 || showAnimActor || decoysHere.length > 0) && (
                     <div
                       className="game-screen__tokens"
                       style={
                         {
                           ["--token-count" as string]: String(
-                            displayHere.length + (showAnimActor ? 1 : 0)
+                            displayHere.length + (showAnimActor ? 1 : 0) + decoysHere.length
                           ),
                         } as CSSProperties
                       }
@@ -1301,6 +1388,19 @@ export function GameScreen({
                             src={p.avatar || DEFAULT_AVATAR}
                             alt=""
                             title={p.nickname}
+                            draggable={false}
+                          />
+                        </div>
+                      ))}
+                      {decoysHere.map((d) => (
+                        <div key={d.id} className="game-screen__token-wrap game-screen__token-wrap--decoy">
+                          <span className="game-screen__token-name">影·{d.nickname}</span>
+                          <PlayerAvatarFrame
+                            variant="fill"
+                            className="game-screen__token game-screen__token--decoy"
+                            src={d.avatar || DEFAULT_AVATAR}
+                            alt=""
+                            title="影分身"
                             draggable={false}
                           />
                         </div>
@@ -1411,20 +1511,16 @@ export function GameScreen({
         <div className="game-screen__overlay-panel game-screen__overlay-panel--rest">
           <p className="game-screen__hint">休息：选择一项或取消</p>
           <div className="game-screen__rest-btns">
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={restHp}
-            >
-              恢复 1 生命
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={restStamina}
-            >
-              恢复 3 体力
-            </button>
+            {restHpAmt > 0 && (
+              <button type="button" className="btn-secondary" onClick={restHp}>
+                恢复 {restHpAmt} 生命
+              </button>
+            )}
+            {restStaminaAmt > 0 && (
+              <button type="button" className="btn-secondary" onClick={restStamina}>
+                恢复 {restStaminaAmt} 体力
+              </button>
+            )}
             <button type="button" className="link-btn" onClick={() => setUiMode({ t: "idle" })}>
               取消
             </button>
@@ -1437,27 +1533,35 @@ export function GameScreen({
           <div className="game-screen__skill-modal-inner">
             <h3 className="game-screen__skill-title">选择技能</h3>
             <ul className="game-screen__skill-list">
-              {mySkills.map((sk) => {
+              {mySkills
+                .filter((sk) => !PASSIVE_SKILLS.includes(sk))
+                .map((sk) => {
                 const meta = state.skillMeta[sk];
                 const turns = cd[sk] ?? 0;
                 const usable = skillUsable(sk);
+                const desc = SKILL_SELECT_DESC[sk];
                 return (
                   <li key={sk}>
                     <button
                       type="button"
                       className="game-screen__skill-item"
                       disabled={!usable || turns > 0}
-                      title={SKILL_HELP[sk] ?? meta?.name}
+                      title={desc ?? meta?.name}
                       onClick={() => {
                         if (sk === "laser") setUiMode({ t: "skillLaser" });
                         else if (sk === "bounty") setUiMode({ t: "skillBounty" });
                         else if (sk === "stealth") fireStealth();
+                        else if (sk === "golden_bell") fireGoldenBell();
                         else if (
                           sk === "missile" ||
                           sk === "sniper" ||
                           sk === "flare" ||
                           sk === "burn" ||
-                          sk === "jump"
+                          sk === "jump" ||
+                          sk === "shadow_clone" ||
+                          sk === "nuke" ||
+                          sk === "landmine" ||
+                          sk === "sonic_radar"
                         )
                           setUiMode({ t: "skillTarget", skill: sk });
                         else if (sk === "jet" || sk === "execute")
@@ -1465,11 +1569,13 @@ export function GameScreen({
                       }}
                     >
                       <span className="game-screen__skill-name">{meta?.name ?? sk}</span>
-                      <span className="game-screen__skill-meta">
-                        {meta ? `${meta.cost} 体` : ""}
-                        {turns > 0 ? ` · 冷却 ${turns} 轮` : ""}
-                        {!usable && turns === 0 ? " · 不可用" : ""}
-                      </span>
+                      {desc ? <span className="game-screen__skill-desc">{desc}</span> : null}
+                      {(turns > 0 || (!usable && turns === 0)) && (
+                        <span className="game-screen__skill-meta">
+                          {turns > 0 ? `剩余冷却 ${turns} 轮` : ""}
+                          {!usable && turns === 0 ? "当前不可用" : ""}
+                        </span>
+                      )}
                     </button>
                   </li>
                 );
@@ -1712,10 +1818,18 @@ export function GameScreen({
               {uiMode.t === "skillTarget" && !skillAimPending && (
                 <span className="game-screen__mode-tag">
                   {uiMode.skill === "execute"
-                    ? "点击紧邻敌人"
+                    ? "点击自身 3×3 范围内的一名敌人"
                     : uiMode.skill === "jet"
                       ? "点击喷射目标格"
-                      : "点击地图选择锚点，然后在下方确认释放"}
+                      : uiMode.skill === "shadow_clone"
+                        ? "在自身 7×7 内选择空格放置影分身"
+                        : uiMode.skill === "nuke"
+                          ? "选择核弹锚点（下一轮 5×5 爆炸）"
+                          : uiMode.skill === "landmine"
+                            ? "在自身 5×5 内选择空格放置地雷"
+                            : uiMode.skill === "sonic_radar"
+                              ? "选择声波雷达锚点（蓝色侦测区）"
+                              : "点击地图选择锚点，然后在下方确认释放"}
                 </span>
               )}
               {skillAimPending && (
@@ -1746,15 +1860,38 @@ export function GameScreen({
   );
 }
 
-const SKILL_HELP: Partial<Record<SkillId, string>> = {
-  laser: "八个方向发射激光，路径上每名敌人 -4 生命，5 体力，冷却 1 轮",
-  missile: "3×3 范围内敌人 -4，6 体力，冷却 1 轮",
-  sniper: "单格有敌人则 -6，8 体力，冷却 2 轮",
-  flare: "5×5 照明一轮，4 体力，冷却 1 轮",
-  burn: "3×3 燃烧两轮，每轮行动 -3，6 体力，冷却 2 轮",
-  bounty: "与可见对手互相透视位置三轮，2 体力，冷却 4 轮",
-  stealth: "隐身两轮，进攻或其他技能会解除，5 体力，冷却 4 轮",
-  jet: "8 格内空格移动，3 体力，冷却 1 轮",
-  jump: "跳到任意空格，5 体力，冷却 2 轮",
-  execute: "紧邻敌人 -7，5 体力，冷却 2 轮",
+/** 选择技能列表：使用形式 · 伤害 · 体力 · 冷却（与 SKILL_META 数值一致） */
+const SKILL_SELECT_DESC: Partial<Record<SkillId, string>> = {
+  laser:
+    "八向选方向直线发射；路径每名敌方 4 点伤害；消耗 5 体力；冷却 1 轮",
+  missile:
+    "点锚释放，中心 3×3；每名敌方 4 点伤害；消耗 6 体力；冷却 1 轮",
+  sniper:
+    "点单格瞄准；该格有敌方则 6 点伤害（仅巨兽亦可），空格可空枪；消耗 8 体力；冷却 2 轮",
+  flare:
+    "点锚释放，5×5 照亮 1 轮；无直接伤害；消耗 4 体力；冷却 1 轮",
+  burn:
+    "点锚释放，3×3 留燃烧区 2 轮；区内停留每回合行动开始时 3 点伤害；消耗 6 体力；冷却 2 轮",
+  bounty:
+    "点一名可见敌方签约赏；双方互相透视位置 3 轮；无直接伤害；消耗 2 体力；冷却 4 轮",
+  stealth:
+    "无需选格，立刻隐身 2 轮；普攻或多数技能会解除；无直接伤害；消耗 5 体力；冷却 4 轮",
+  jet:
+    "点目标空格；切比雪夫 ≤8 的移动；无直接伤害；消耗 3 体力；冷却 1 轮",
+  jump:
+    "点全图可站立空格跳跃；无直接伤害；消耗 5 体力；冷却 2 轮",
+  execute:
+    "点自身 3×3 内的一名敌方；7 点伤害；消耗 5 体力；冷却 2 轮",
+  shadow_clone:
+    "点 7×7 内空格放假身 2 轮（假身 1 血）；无攻击伤害；消耗 4 体力；冷却 4 轮",
+  golden_bell:
+    "无需选格，开启金钟罩；下轮受玩家/巨兽伤害各减 3；消耗 4 体力；冷却 3 轮",
+  blade_escape:
+    "被动抵御致死（不计入选技能列表）",
+  nuke:
+    "点锚放置核弹；下轮开始 5×5 范围内 8 点伤害；消耗 6 体力；冷却 3 轮",
+  landmine:
+    "点自身 5×5 内空格埋雷，踩踏 4 点伤害；消耗首枚 2、本回合第二枚 3 体力；冷却 1 轮",
+  sonic_radar:
+    "点空格放置雷达（装置 3 血）；侦测区内敌方移动全图播报轨迹；无直接伤害；消耗 4 体力；冷却 4 轮",
 };

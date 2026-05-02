@@ -1,19 +1,16 @@
 import {
-  ALL_SKILLS_POOL,
   ATTACK_COST,
-  ATTACK_DAMAGE,
   ATTACK_RANGE,
-  DEFAULT_HP,
   TURN_LIMIT_MS,
-  DEFAULT_MAX_STAMINA,
-  DEFAULT_START_STAMINA,
   SKILL_META,
   type SkillId,
   VISION_RADIUS,
 } from "./constants.js";
+import { toGameSessionRules, type RoomGameSettings } from "../roomGameSettings.js";
 import { randomUUID } from "node:crypto";
 import {
   cellKey,
+  cellsInChebyshevDisk,
   cellsInRectCenter,
   chebyshev,
   formatCellLabel,
@@ -36,6 +33,7 @@ import type {
   GameSession,
   MapEventKind,
   MapEventState,
+  PendingNukeState,
   TurnFlags,
 } from "./gameTypes.js";
 
@@ -62,7 +60,7 @@ export type RoomPlayerLite = {
   botDifficulty?: BotDifficulty;
 };
 
-const REPLAY_SYSTEM = "__system__";
+export const REPLAY_SYSTEM = "__system__";
 const REPLAY_BEAST = "__beast__";
 const BEAST_MAX_HP = 15;
 type DamageEvent = NonNullable<GameReplayEntry["damageEvents"]>[number];
@@ -141,6 +139,18 @@ export function rebindPlayerSocket(g: GameSession, oldSid: string, newSid: strin
   for (const pl of g.players.values()) {
     if (pl.bountyPartnerId === oldSid) pl.bountyPartnerId = newSid;
   }
+  for (const c of g.shadowClones) {
+    if (c.ownerId === oldSid) c.ownerId = newSid;
+  }
+  for (const n of g.pendingNukes) {
+    if (n.ownerId === oldSid) n.ownerId = newSid;
+  }
+  for (const m of g.landmines) {
+    if (m.ownerId === oldSid) m.ownerId = newSid;
+  }
+  for (const r of g.sonicRadars) {
+    if (r.ownerId === oldSid) r.ownerId = newSid;
+  }
 }
 
 /** 断线超过 maxMs 未重连则淘汰 */
@@ -168,13 +178,16 @@ export function createGameFromRoom(
   roomCode: string,
   roomPlayers: Map<string, RoomPlayerLite>,
   gridSize: number,
-  matchMode: MatchMode = "solo"
+  matchMode: MatchMode = "solo",
+  roomGameSettings: RoomGameSettings
 ): { session: GameSession; spawnBySocket: Record<string, { slotIndex: number; gridLabel: string }> } | null {
   const sorted = [...roomPlayers.values()].sort((a, b) => a.slotIndex - b.slotIndex);
   const modeCfg = matchModeConfig(matchMode);
   const spawns = pickSpawnPositions(sorted.length, gridSize);
   if (!spawns) return null;
   const wallKeys = generateWallKeys(gridSize, spawns);
+  const rs = roomGameSettings;
+  const rules = toGameSessionRules(rs);
 
   const slotAssignments: Record<number, string> = {};
   const players = new Map<string, GamePlayer>();
@@ -198,8 +211,8 @@ export function createGameFromRoom(
       avatar: p.avatar,
       col: pos.col,
       row: pos.row,
-      hp: DEFAULT_HP,
-      stamina: hardCpu ? DEFAULT_MAX_STAMINA : DEFAULT_START_STAMINA,
+      hp: rs.initialHp,
+      stamina: hardCpu ? rs.maxStamina : rs.initialStamina,
       skills: [],
       turnSerial: 0,
       lastSkillAtTurn: {},
@@ -211,6 +224,8 @@ export function createGameFromRoom(
       damageBonus: 0,
       deathCause: null,
       botDifficulty: botDiff,
+      goldenBellForRound: null,
+      markedExposeUntilRound: null,
     });
   });
 
@@ -221,6 +236,7 @@ export function createGameFromRoom(
     matchMode: modeCfg.mode,
     matchModeLabel: modeCfg.label,
     teamSize: modeCfg.teamSize,
+    rules,
     matchId: randomUUID(),
     retiredToLobby: new Set(),
     slotAssignments,
@@ -233,6 +249,10 @@ export function createGameFromRoom(
     burningZones: [],
     flareZones: [],
     bountyPairs: [],
+    shadowClones: [],
+    pendingNukes: [],
+    landmines: [],
+    sonicRadars: [],
     turnFlags: new Map(),
     phase: "playing",
     winnerId: null,
@@ -261,14 +281,26 @@ export function currentPlayerId(g: GameSession): string {
   return g.turnOrder[g.turnIndex]!;
 }
 
+function sessionMaxHp(g: GameSession): number {
+  return g.rules.maxHp;
+}
+
+function sessionMaxStamina(g: GameSession): number {
+  return g.rules.maxStamina;
+}
+
+function sessionAttackDamage(g: GameSession): number {
+  return g.rules.attackDamage;
+}
+
 function onTurnStart(g: GameSession, pid: string): void {
   const p = g.players.get(pid);
   if (!p || p.hp <= 0) return;
   p.turnSerial++;
-  p.stamina = Math.min(DEFAULT_MAX_STAMINA, p.stamina + 2);
+  p.stamina = Math.min(sessionMaxStamina(g), p.stamina + 2);
   /** 高级电脑：回合开始额外恢复 3 点体力（仍受上限约束） */
   if (p.botDifficulty === "hard") {
-    p.stamina = Math.min(DEFAULT_MAX_STAMINA, p.stamina + 3);
+    p.stamina = Math.min(sessionMaxStamina(g), p.stamina + 3);
   }
   const n = g.gridSize;
   const burnEvents: DamageEvent[] = [];
@@ -288,12 +320,15 @@ function onTurnStart(g: GameSession, pid: string): void {
 }
 
 /** 战斗中体力归零者移出行列并结算胜负（可连续多名） */
-export function eliminateAllDeadFromTurn(g: GameSession): void {
+export function eliminateAllDeadFromTurn(
+  g: GameSession,
+  opts?: { skipTurnCallbacks?: boolean }
+): void {
   for (;;) {
     if (g.phase !== "playing") return;
     const deadInTurn = g.turnOrder.find((id) => (g.players.get(id)?.hp ?? 0) <= 0);
     if (!deadInTurn) return;
-    eliminatePlayerFromGame(g, deadInTurn);
+    eliminatePlayerFromGame(g, deadInTurn, opts);
   }
 }
 
@@ -327,6 +362,10 @@ export function eliminatePlayerFromGame(
   for (const p of g.players.values()) {
     if (p.bountyPartnerId === socketId) p.bountyPartnerId = null;
   }
+  g.shadowClones = g.shadowClones.filter((c) => c.ownerId !== socketId);
+  g.pendingNukes = g.pendingNukes.filter((n) => n.ownerId !== socketId);
+  g.landmines = g.landmines.filter((m) => m.ownerId !== socketId);
+  g.sonicRadars = g.sonicRadars.filter((r) => r.ownerId !== socketId);
 
   if (g.turnOrder.length === 0) {
     g.phase = "ended";
@@ -500,7 +539,8 @@ function applyMapEvent(g: GameSession, ev: MapEventState): void {
       }
     }
     appendReplayLog(g, REPLAY_SYSTEM, "火山喷发：区域内玩家受到 3 点伤害", formatDamageEvents(events), events);
-    eliminateAllDeadFromTurn(g);
+    /** 处于 round 起点 onRoundStart 内，外层 endTurn 会再调 startCurrentTurn，禁止此处回调否则同一回合被开启两次 */
+    eliminateAllDeadFromTurn(g, { skipTurnCallbacks: true });
     return;
   }
 
@@ -521,8 +561,8 @@ function applyMapEvent(g: GameSession, ev: MapEventState): void {
   for (const p of g.players.values()) {
     if (p.hp <= 0) continue;
     if (cells.some((cell) => cell.col === p.col && cell.row === p.row)) {
-      p.hp = Math.min(DEFAULT_HP, p.hp + 3);
-      p.stamina = Math.min(DEFAULT_MAX_STAMINA, p.stamina + 3);
+      p.hp = Math.min(sessionMaxHp(g), p.hp + 3);
+      p.stamina = Math.min(sessionMaxStamina(g), p.stamina + 3);
       healed.push(p.nickname);
     }
   }
@@ -689,7 +729,12 @@ export function runPendingBeastTurn(g: GameSession): {
   const beast = g.beast;
   if (!g.beastTurnPending || !beast || beast.hp <= 0 || beast.lastActedRound === g.roundNumber) return null;
   const positions = moveBeast(g);
-  const damageEvents = beastAttack(g);
+  const mineEvents: DamageEvent[] = [];
+  for (const k of beastCellKeys(beast)) {
+    const pos = parseKey(k);
+    mineEvents.push(...triggerLandminesAt(g, REPLAY_BEAST, pos.col, pos.row));
+  }
+  const damageEvents = [...mineEvents, ...beastAttack(g)];
   beast.lastActedRound = g.roundNumber;
   g.beastTurnPending = false;
   appendReplayLog(
@@ -699,7 +744,8 @@ export function runPendingBeastTurn(g: GameSession): {
     formatDamageEvents(damageEvents),
     damageEvents
   );
-  eliminateAllDeadFromTurn(g);
+  /** 随后会 turnIndex=0、新回合 onRoundStart、startCurrentTurn，禁止淘汰回调里再开回合 */
+  eliminateAllDeadFromTurn(g, { skipTurnCallbacks: true });
   if (g.phase !== "playing") {
     return {
       from: positions[0] ?? { col: beast.col, row: beast.row },
@@ -719,6 +765,20 @@ export function runPendingBeastTurn(g: GameSession): {
 }
 
 function onRoundStart(g: GameSession): void {
+  resolveNukeExplosions(g);
+  for (const pl of g.players.values()) {
+    if (pl.markedExposeUntilRound != null && g.roundNumber > pl.markedExposeUntilRound) {
+      pl.markedExposeUntilRound = null;
+    }
+  }
+  for (const d of g.shadowClones) {
+    d.roundsLeft -= 1;
+  }
+  g.shadowClones = g.shadowClones.filter((d) => d.roundsLeft > 0);
+  for (const r of g.sonicRadars) {
+    r.roundsLeft -= 1;
+  }
+  g.sonicRadars = g.sonicRadars.filter((r) => r.roundsLeft > 0);
   for (const z of g.burningZones) {
     z.roundsLeft -= 1;
   }
@@ -755,7 +815,10 @@ function startCurrentTurn(g: GameSession): void {
     if (g.beastTurnPending) return;
     const next = currentPlayerId(g);
     const p = g.players.get(next);
-    if (!p || p.hp <= 0) return;
+    if (!p || p.hp <= 0) {
+      eliminateAllDeadFromTurn(g, { skipTurnCallbacks: true });
+      continue;
+    }
     if (p.skipNextTurn) {
       p.skipNextTurn = false;
       appendReplayLog(g, REPLAY_SYSTEM, `地震影响：${p.nickname} 本轮无法行动`);
@@ -764,6 +827,12 @@ function startCurrentTurn(g: GameSession): void {
     }
     g.turnFlags.set(next, freshTurnFlags());
     onTurnStart(g, next);
+    /** 回合开始燃烧等伤害可能致死；勿在此处 startCurrentTurn，仅同步队列 */
+    eliminateAllDeadFromTurn(g, { skipTurnCallbacks: true });
+    if (g.phase !== "playing") return;
+    if (currentPlayerId(g) !== next || (g.players.get(next)?.hp ?? 0) <= 0) {
+      continue;
+    }
     g.turnTimerSeq++;
     g.turnDeadlineAt = Date.now() + TURN_LIMIT_MS;
     checkWinner(g);
@@ -805,9 +874,96 @@ function canUseSkill(g: GameSession, actorId: string, sk: SkillId): boolean {
   const p = g.players.get(actorId);
   if (!p) return false;
   if (!p.skills.includes(sk)) return false;
+  if (sk === "blade_escape") return false;
   const meta = SKILL_META[sk];
   const last = p.lastSkillAtTurn[sk] ?? -9999;
   return p.turnSerial - last > meta.cooldown;
+}
+
+function skillStaminaCost(g: GameSession, actorId: string, sk: SkillId): number {
+  const meta = SKILL_META[sk];
+  if (sk !== "landmine") return meta.cost;
+  const tf = g.turnFlags.get(actorId);
+  const usedLandmines = tf?.skillIdsUsed.filter((x) => x === "landmine").length ?? 0;
+  return usedLandmines >= 1 ? 3 : meta.cost;
+}
+
+function skillDamageAmountFor(g: GameSession, actorId: string, base: number): number {
+  if (actorId === REPLAY_SYSTEM || actorId === REPLAY_BEAST) return base;
+  return damageAmountFor(g, actorId, base);
+}
+
+function triggerLandminesAt(g: GameSession, walkerId: string, col: number, row: number): DamageEvent[] {
+  const idx = g.landmines.findIndex((m) => m.col === col && m.row === row);
+  if (idx < 0) return [];
+  const mine = g.landmines[idx]!;
+  g.landmines.splice(idx, 1);
+  if (walkerId === REPLAY_BEAST) {
+    const evt = applyBeastDamage(g, mine.ownerId, 4);
+    return evt ? [evt] : [];
+  }
+  const victim = g.players.get(walkerId);
+  if (!victim || victim.hp <= 0) return [];
+  const evt = applyTrapDamageToPlayer(g, victim, 4, "地雷");
+  return evt ? [evt] : [];
+}
+
+function logSonicRadarForPath(g: GameSession, actorId: string, path: Array<{ col: number; row: number }>): void {
+  const mover = g.players.get(actorId);
+  if (!mover || path.length === 0) return;
+  for (const radar of g.sonicRadars) {
+    const zone = new Set(
+      cellsInChebyshevDisk(radar.col, radar.row, 4, g.gridSize).map((c) => cellKey(c.col, c.row))
+    );
+    const touches = path.some((step) => zone.has(cellKey(step.col, step.row)));
+    if (touches) {
+      const labels = path.map((s) => formatCellLabel(s.col, s.row)).join(" → ");
+      appendReplayLog(g, REPLAY_SYSTEM, `声波雷达：${mover.nickname} 在侦测区内移动 ${labels}`);
+      return;
+    }
+  }
+}
+
+function cellHasLivingPlayer(g: GameSession, col: number, row: number): boolean {
+  return [...g.players.values()].some((p) => p.hp > 0 && p.col === col && p.row === row);
+}
+
+function cellBlockedForSkillPlacement(g: GameSession, col: number, row: number): boolean {
+  if (!cellInPlayableArea(g, col, row) || cellIsWall(g, col, row)) return true;
+  if (cellHasLivingPlayer(g, col, row)) return true;
+  if (beastOccupies(g.beast, col, row)) return true;
+  if (g.shadowClones.some((d) => d.col === col && d.row === row)) return true;
+  if (g.pendingNukes.some((n) => n.col === col && n.row === row)) return true;
+  if (g.landmines.some((m) => m.col === col && m.row === row)) return true;
+  if (g.sonicRadars.some((r) => r.col === col && r.row === row)) return true;
+  return false;
+}
+
+function resolveNukeExplosions(g: GameSession): void {
+  const remain: PendingNukeState[] = [];
+  for (const nuke of g.pendingNukes) {
+    if (g.roundNumber <= nuke.placedRound) {
+      remain.push(nuke);
+      continue;
+    }
+    const cells = cellsInRectCenter(nuke.col, nuke.row, 2, g.gridSize);
+    const events: DamageEvent[] = [];
+    for (const cell of cells) {
+      events.push(...damageShadowDecoysOnCell(g, nuke.ownerId, cell.col, cell.row, "核弹"));
+      events.push(...damageSonicRadarsOnCell(g, nuke.ownerId, cell.col, cell.row, 8, "核弹"));
+      events.push(...damageEnemiesOnCell(g, nuke.ownerId, cell.col, cell.row, 8, "核弹"));
+      events.push(...damageBeastOnCells(g, nuke.ownerId, [cell], 8));
+    }
+    appendReplayLog(
+      g,
+      REPLAY_SYSTEM,
+      `核弹爆炸（${formatCellLabel(nuke.col, nuke.row)}）`,
+      formatDamageEvents(events),
+      events
+    );
+    eliminateAllDeadFromTurn(g, { skipTurnCallbacks: true });
+  }
+  g.pendingNukes = remain;
 }
 
 /** 对格内所有敌方存活单位造成伤害（允许多人同格） */
@@ -819,27 +975,67 @@ function damageEnemiesOnCell(
   dmg: number,
   operation: string
 ): DamageEvent[] {
-  const actor = g.players.get(actorId);
-  const finalDmg = damageAmountFor(g, actorId, dmg);
   const events: DamageEvent[] = [];
   for (const pl of g.players.values()) {
     if (pl.hp > 0 && pl.col === col && pl.row === row && pl.socketId !== actorId && !sameTeam(g, actorId, pl.socketId)) {
-      const amount = Math.min(finalDmg, pl.hp);
-      pl.hp = Math.max(0, pl.hp - finalDmg);
-      if (pl.hp <= 0 && !pl.deathCause) pl.deathCause = deathCauseFor(g, actorId, operation);
-      if (amount > 0) {
-        const deathCause = pl.hp <= 0 ? (pl.deathCause ?? deathCauseFor(g, actorId, operation)) : undefined;
-        events.push({
-          sourceId: actorId,
-          sourceNickname: actor?.nickname ?? (actorId === REPLAY_BEAST ? "巨兽" : "系统"),
-          targetId: pl.socketId,
-          targetNickname: pl.nickname,
-          amount,
-          operation,
-          deathCause,
-        });
-      }
+      const evt = applyDirectDamage(g, actorId, pl, dmg, operation);
+      if (evt) events.push(evt);
     }
+  }
+  return events;
+}
+
+function damageShadowDecoysOnCell(
+  g: GameSession,
+  actorId: string,
+  col: number,
+  row: number,
+  operation: string
+): DamageEvent[] {
+  const events: DamageEvent[] = [];
+  const actor = g.players.get(actorId);
+  g.shadowClones = g.shadowClones.filter((d) => {
+    if (d.col !== col || d.row !== row) return true;
+    if (sameTeam(g, actorId, d.ownerId)) return true;
+    const owner = g.players.get(d.ownerId);
+    events.push({
+      sourceId: actorId,
+      sourceNickname: actor?.nickname ?? (actorId === REPLAY_BEAST ? "巨兽" : "系统"),
+      targetId: d.id,
+      targetNickname: `影分身(${owner?.nickname ?? "?"})`,
+      amount: 1,
+      operation,
+    });
+    return false;
+  });
+  return events;
+}
+
+function damageSonicRadarsOnCell(
+  g: GameSession,
+  actorId: string,
+  col: number,
+  row: number,
+  rawDmg: number,
+  operation: string
+): DamageEvent[] {
+  const events: DamageEvent[] = [];
+  const actor = g.players.get(actorId);
+  for (let i = g.sonicRadars.length - 1; i >= 0; i--) {
+    const r = g.sonicRadars[i]!;
+    if (r.col !== col || r.row !== row) continue;
+    const prevHp = r.hp;
+    r.hp -= rawDmg;
+    events.push({
+      sourceId: actorId,
+      sourceNickname: actor?.nickname ?? (actorId === REPLAY_BEAST ? "巨兽" : "系统"),
+      targetId: r.id,
+      targetNickname: "声波雷达",
+      amount: Math.min(rawDmg, prevHp),
+      operation,
+    });
+    if (r.hp <= 0) g.sonicRadars.splice(i, 1);
+    break;
   }
   return events;
 }
@@ -852,11 +1048,47 @@ function applyDirectDamage(
   operation: string
 ): DamageEvent | null {
   if (target.hp <= 0) return null;
-  if (sameTeam(g, actorId, target.socketId)) return null;
-  const actor = g.players.get(actorId);
-  const finalDmg = damageAmountFor(g, actorId, dmg);
-  const amount = Math.min(finalDmg, target.hp);
-  target.hp = Math.max(0, target.hp - finalDmg);
+  if (actorId !== REPLAY_SYSTEM && actorId !== REPLAY_BEAST) {
+    if (sameTeam(g, actorId, target.socketId)) return null;
+  }
+  const actor =
+    actorId !== REPLAY_SYSTEM && actorId !== REPLAY_BEAST ? g.players.get(actorId) : undefined;
+  let raw = skillDamageAmountFor(g, actorId, dmg);
+  const preBell = raw;
+
+  const bellActive =
+    target.goldenBellForRound != null && target.goldenBellForRound === g.roundNumber;
+  if (bellActive) {
+    raw = Math.max(0, raw - 3);
+    if (actor && actorId !== REPLAY_BEAST && actorId !== REPLAY_SYSTEM && preBell > 0) {
+      const thru = g.roundNumber + 1;
+      actor.markedExposeUntilRound =
+        actor.markedExposeUntilRound == null
+          ? thru
+          : Math.max(actor.markedExposeUntilRound, thru);
+    }
+  }
+
+  const bladeIdx = target.skills.indexOf("blade_escape");
+  if (bladeIdx >= 0 && raw > 0 && target.hp - raw <= 0) {
+    const oldHp = target.hp;
+    target.skills.splice(bladeIdx, 1);
+    target.hp = 1;
+    return {
+      sourceId: actorId,
+      sourceNickname: actor?.nickname ?? (actorId === REPLAY_BEAST ? "巨兽" : "系统"),
+      targetId: target.socketId,
+      targetNickname: target.nickname,
+      amount: Math.max(0, oldHp - 1),
+      operation,
+      deathCause: undefined,
+    };
+  }
+
+  if (raw <= 0) return null;
+
+  const amount = Math.min(raw, target.hp);
+  target.hp = Math.max(0, target.hp - raw);
   if (target.hp <= 0 && !target.deathCause) target.deathCause = deathCauseFor(g, actorId, operation);
   if (amount <= 0) return null;
   const deathCause = target.hp <= 0 ? (target.deathCause ?? deathCauseFor(g, actorId, operation)) : undefined;
@@ -869,6 +1101,15 @@ function applyDirectDamage(
     operation,
     deathCause,
   };
+}
+
+function applyTrapDamageToPlayer(
+  g: GameSession,
+  target: GamePlayer,
+  dmg: number,
+  operation: string
+): DamageEvent | null {
+  return applyDirectDamage(g, REPLAY_SYSTEM, target, dmg, operation);
 }
 
 function applyBeastDamage(g: GameSession, actorId: string, dmg: number): DamageEvent | null {
@@ -887,8 +1128,8 @@ function applyBeastDamage(g: GameSession, actorId: string, dmg: number): DamageE
     amount,
   };
   if (beast.hp <= 0 && actor) {
-    actor.hp = Math.min(DEFAULT_HP, actor.hp + 4);
-    actor.stamina = Math.min(DEFAULT_MAX_STAMINA, actor.stamina + 3);
+    actor.hp = Math.min(sessionMaxHp(g), actor.hp + 4);
+    actor.stamina = Math.min(sessionMaxStamina(g), actor.stamina + 3);
     actor.damageBonus += 1;
     appendReplayLog(g, actorId, `击杀巨兽：${actor.nickname} 获得生命、体力与伤害加成`);
   }
@@ -970,6 +1211,7 @@ export function applyGameAction(
       let c = p.col;
       let r = p.row;
       let cost = 0;
+      const visited: Array<{ col: number; row: number }> = [];
       for (const step of path) {
         if (manhattan({ col: c, row: r }, step) !== 1) return { ok: false, error: "只能横竖相邻移动" };
         if (!inBounds(step.col, step.row, n)) return { ok: false, error: "越界" };
@@ -980,6 +1222,25 @@ export function applyGameAction(
         c = step.col;
         r = step.row;
         cost++;
+        visited.push({ col: c, row: r });
+        const mineEv = triggerLandminesAt(g, actorId, c, r);
+        if (mineEv.length > 0) {
+          if (p.stamina < cost) return { ok: false, error: "体力不足" };
+          p.stamina -= cost;
+          p.col = c;
+          p.row = r;
+          tf.didMove = true;
+          appendReplayLog(
+            g,
+            actorId,
+            `移动至 ${formatCellLabel(c, r)}（地雷）`,
+            formatDamageEvents(mineEv),
+            mineEv
+          );
+          eliminateAllDeadFromTurn(g);
+          logSonicRadarForPath(g, actorId, visited);
+          return { ok: true };
+        }
       }
       if (p.stamina < cost) return { ok: false, error: "体力不足" };
       p.stamina -= cost;
@@ -987,6 +1248,7 @@ export function applyGameAction(
       p.row = r;
       tf.didMove = true;
       appendReplayLog(g, actorId, `移动至 ${formatCellLabel(p.col, p.row)}`);
+      logSonicRadarForPath(g, actorId, visited);
       return { ok: true };
     }
     case "attack": {
@@ -1002,9 +1264,12 @@ export function applyGameAction(
       p.stamina -= ATTACK_COST;
       tf.didAttack = true;
       if (p.stealthActive) p.stealthActive = false;
+      const ad = sessionAttackDamage(g);
       const damageEvents = [
-        ...damageEnemiesOnCell(g, actorId, action.col, action.row, ATTACK_DAMAGE, "普通攻击"),
-        ...damageBeastOnCells(g, actorId, [{ col: action.col, row: action.row }], ATTACK_DAMAGE),
+        ...damageShadowDecoysOnCell(g, actorId, action.col, action.row, "普通攻击"),
+        ...damageSonicRadarsOnCell(g, actorId, action.col, action.row, ad, "普通攻击"),
+        ...damageEnemiesOnCell(g, actorId, action.col, action.row, ad, "普通攻击"),
+        ...damageBeastOnCells(g, actorId, [{ col: action.col, row: action.row }], ad),
       ];
       eliminateAllDeadFromTurn(g);
       appendReplayLog(
@@ -1022,17 +1287,23 @@ export function applyGameAction(
       }
       const mode = String((action as { mode?: string }).mode ?? "");
       if (mode === "hp") {
-        if (p.hp >= DEFAULT_HP) return { ok: false, error: "生命已达上限，无法恢复" };
-        p.hp = Math.min(DEFAULT_HP, p.hp + 1);
+        const rh = g.rules.restHp;
+        if (rh <= 0) return { ok: false, error: "本局休息不可恢复生命" };
+        if (p.hp >= sessionMaxHp(g)) return { ok: false, error: "生命已达上限，无法恢复" };
+        p.hp = Math.min(sessionMaxHp(g), p.hp + rh);
       } else {
-        if (p.stamina >= DEFAULT_MAX_STAMINA) return { ok: false, error: "体力已达上限，无法恢复" };
-        p.stamina = Math.min(DEFAULT_MAX_STAMINA, p.stamina + 3);
+        const rst = g.rules.restStamina;
+        if (rst <= 0) return { ok: false, error: "本局休息不可恢复体力" };
+        if (p.stamina >= sessionMaxStamina(g)) return { ok: false, error: "体力已达上限，无法恢复" };
+        p.stamina = Math.min(sessionMaxStamina(g), p.stamina + rst);
       }
       tf.didRest = true;
       appendReplayLog(
         g,
         actorId,
-        mode === "hp" ? "休息：恢复 1 点生命" : "休息：恢复 3 点体力"
+        mode === "hp"
+          ? `休息：恢复 ${g.rules.restHp} 点生命`
+          : `休息：恢复 ${g.rules.restStamina} 点体力`
       );
       endTurn(g);
       return { ok: true };
@@ -1044,11 +1315,12 @@ export function applyGameAction(
       if (p.skills.length >= 5 && !action.confirmOverwrite) {
         return { ok: false, error: "已拥有5个技能，继续学习将随机覆盖一个技能" };
       }
-      let choices = ALL_SKILLS_POOL.filter((s) => !p.skills.includes(s));
+      const pool = g.rules.learnableSkills;
+      let choices = pool.filter((s) => !p.skills.includes(s));
       let overwritten: SkillId | undefined;
       if (choices.length === 0 && p.skills.length > 0) {
         overwritten = p.skills.splice(Math.floor(Math.random() * p.skills.length), 1)[0];
-        choices = ALL_SKILLS_POOL.filter((s) => !p.skills.includes(s));
+        choices = pool.filter((s) => !p.skills.includes(s));
       }
       if (choices.length === 0) return { ok: false, error: "无法学习技能" };
       if (p.skills.length >= 5) {
@@ -1074,11 +1346,11 @@ export function applyGameAction(
       const sk = action.skillId;
       if (!p.skills.includes(sk)) return { ok: false, error: "未掌握该技能" };
       if (!canUseSkill(g, actorId, sk)) return { ok: false, error: "技能冷却中" };
-      const meta = SKILL_META[sk];
-      if (p.stamina < meta.cost) return { ok: false, error: "体力不足" };
+      const staminaCost = skillStaminaCost(g, actorId, sk);
+      if (p.stamina < staminaCost) return { ok: false, error: "体力不足" };
       const res = executeSkill(g, actorId, sk, action.payload);
       if (!res.ok) return res;
-      p.stamina -= meta.cost;
+      p.stamina -= staminaCost;
       p.lastSkillAtTurn[sk] = p.turnSerial;
       tf.skillIdsUsed.push(sk);
       if (p.stealthActive && sk !== "stealth") p.stealthActive = false;
@@ -1086,7 +1358,7 @@ export function applyGameAction(
       appendReplayLog(
         g,
         actorId,
-        `使用技能：${meta.name}`,
+        `使用技能：${SKILL_META[sk].name}`,
         formatDamageEvents(res.damageEvents ?? []),
         res.damageEvents
       );
@@ -1124,6 +1396,8 @@ function executeSkill(
       const cells = rayFrom(p.col, p.row, di, dj, n);
       const damageEvents: DamageEvent[] = [];
       for (const cell of cells) {
+        damageEvents.push(...damageShadowDecoysOnCell(g, actorId, cell.col, cell.row, "激光"));
+        damageEvents.push(...damageSonicRadarsOnCell(g, actorId, cell.col, cell.row, 4, "激光"));
         damageEvents.push(...damageEnemiesOnCell(g, actorId, cell.col, cell.row, 4, "激光"));
       }
       damageEvents.push(...damageBeastOnCells(g, actorId, cells, 4));
@@ -1137,6 +1411,8 @@ function executeSkill(
       const damageEvents: DamageEvent[] = [];
       const cells = cellsInRectCenter(col, row, 1, n);
       for (const cell of cells) {
+        damageEvents.push(...damageShadowDecoysOnCell(g, actorId, cell.col, cell.row, "导弹"));
+        damageEvents.push(...damageSonicRadarsOnCell(g, actorId, cell.col, cell.row, 4, "导弹"));
         damageEvents.push(...damageEnemiesOnCell(g, actorId, cell.col, cell.row, 4, "导弹"));
       }
       damageEvents.push(...damageBeastOnCells(g, actorId, cells, 4));
@@ -1147,13 +1423,23 @@ function executeSkill(
       const row = Number(payload.row);
       if (!inBounds(col, row, n)) return { ok: false, error: "无效坐标" };
       if (!cellInPlayableArea(g, col, row)) return { ok: false, error: "该格已不在安全区内" };
+      const pre: DamageEvent[] = [
+        ...damageShadowDecoysOnCell(g, actorId, col, row, "狙击"),
+        ...damageSonicRadarsOnCell(g, actorId, col, row, 6, "狙击"),
+      ];
       const tgt = [...g.players.values()].find(
         (x) => x.hp > 0 && x.col === col && x.row === row && x.socketId !== actorId && !sameTeam(g, actorId, x.socketId)
       );
-      if (!tgt && !beastOccupies(g.beast, col, row)) return { ok: false, error: "目标格无敌人" };
-      if (!tgt) return { ok: true, damageEvents: damageBeastOnCells(g, actorId, [{ col, row }], 6) };
+      if (!tgt && !beastOccupies(g.beast, col, row)) {
+        // 允许对空格释放（空枪），仍消耗体力与进入冷却
+        return { ok: true, damageEvents: [...pre, ...damageBeastOnCells(g, actorId, [{ col, row }], 6)] };
+      }
+      if (!tgt) return { ok: true, damageEvents: [...pre, ...damageBeastOnCells(g, actorId, [{ col, row }], 6)] };
       const evt = applyDirectDamage(g, actorId, tgt, 6, "狙击");
-      return { ok: true, damageEvents: [...(evt ? [evt] : []), ...damageBeastOnCells(g, actorId, [{ col, row }], 6)] };
+      return {
+        ok: true,
+        damageEvents: [...pre, ...(evt ? [evt] : []), ...damageBeastOnCells(g, actorId, [{ col, row }], 6)],
+      };
     }
     case "flare": {
       const col = Number(payload.col);
@@ -1218,9 +1504,62 @@ function executeSkill(
       const tgt = g.players.get(targetId);
       if (!tgt || tgt.hp <= 0) return { ok: false, error: "无效目标" };
       if (sameTeam(g, actorId, targetId)) return { ok: false, error: "不能攻击队友" };
-      if (manhattan(p, tgt) !== 1) return { ok: false, error: "必须紧邻敌人" };
+      /** 以自身为中心的 3×3（切比雪夫距离 ≤1，不含与自身同格） */
+      if (tgt.col === p.col && tgt.row === p.row) return { ok: false, error: "无效目标" };
+      if (chebyshev(p, tgt) > 1) return { ok: false, error: "目标须在以自身为中心的 3×3 范围内" };
       const evt = applyDirectDamage(g, actorId, tgt, 7, "斩首");
       return { ok: true, damageEvents: evt ? [evt] : [] };
+    }
+    case "shadow_clone": {
+      const col = Number(payload.col);
+      const row = Number(payload.row);
+      if (!inBounds(col, row, n)) return { ok: false, error: "无效坐标" };
+      if (chebyshev(p, { col, row }) > 3) return { ok: false, error: "超出影分身放置距离" };
+      if (cellBlockedForSkillPlacement(g, col, row)) return { ok: false, error: "该格无法放置" };
+      const id = `clone:${randomUUID()}`;
+      g.shadowClones.push({ id, ownerId: actorId, col, row, roundsLeft: 2 });
+      return { ok: true };
+    }
+    case "golden_bell": {
+      p.goldenBellForRound = g.roundNumber + 1;
+      return { ok: true };
+    }
+    case "blade_escape":
+      return { ok: false, error: "被动技能，无法主动使用" };
+    case "nuke": {
+      const col = Number(payload.col);
+      const row = Number(payload.row);
+      if (!inBounds(col, row, n)) return { ok: false, error: "无效坐标" };
+      if (cellBlockedForSkillPlacement(g, col, row)) return { ok: false, error: "该格无法放置" };
+      const id = `nuke:${randomUUID()}`;
+      g.pendingNukes.push({ id, ownerId: actorId, col, row, placedRound: g.roundNumber });
+      appendReplayLog(
+        g,
+        REPLAY_SYSTEM,
+        `核弹预警：${formatCellLabel(col, row)} 将于下一轮在 5×5 范围内爆炸`
+      );
+      return { ok: true };
+    }
+    case "landmine": {
+      const col = Number(payload.col);
+      const row = Number(payload.row);
+      if (!inBounds(col, row, n)) return { ok: false, error: "无效坐标" };
+      if (chebyshev(p, { col, row }) > 2) return { ok: false, error: "超出地雷放置距离" };
+      if (cellBlockedForSkillPlacement(g, col, row)) return { ok: false, error: "该格无法放置" };
+      if (g.landmines.filter((m) => m.ownerId === actorId).length >= 2)
+        return { ok: false, error: "场上最多保留 2 枚地雷" };
+      const id = `mine:${randomUUID()}`;
+      g.landmines.push({ id, ownerId: actorId, col, row });
+      return { ok: true };
+    }
+    case "sonic_radar": {
+      const col = Number(payload.col);
+      const row = Number(payload.row);
+      if (!inBounds(col, row, n)) return { ok: false, error: "无效坐标" };
+      if (cellBlockedForSkillPlacement(g, col, row)) return { ok: false, error: "该格无法放置" };
+      const id = `radar:${randomUUID()}`;
+      g.sonicRadars.push({ id, ownerId: actorId, col, row, roundsLeft: 1, hp: 3 });
+      return { ok: true };
     }
     default:
       return { ok: false, error: "未知技能" };
@@ -1291,10 +1630,13 @@ export function serializePublicPlayer(
       (b.aId === viewerId && b.bId === pl.socketId) ||
       (b.bId === viewerId && b.aId === pl.socketId)
   );
+  const forceExpose =
+    pl.markedExposeUntilRound != null && g.roundNumber <= pl.markedExposeUntilRound;
   const canSeePosition =
     Boolean(opts?.spectatorVision) ||
     pl.socketId === viewerId ||
     bountySee ||
+    forceExpose ||
     (seeCell && !pl.stealthActive);
 
   const avatarOut = opts?.roomAvatarBySocket?.get(pl.socketId) ?? pl.avatar;
@@ -1324,6 +1666,18 @@ export type BuildGamePayloadOpts = {
   /** 房间内已点「观战」的人数（所有客户端一致展示） */
   watchingSpectatorCount?: number;
 };
+
+/** 核弹全局预警：锚点格 + 与爆炸判定一致的 5×5（half=2）范围 */
+function pendingNukeWarningKeys(g: GameSession): string[] {
+  const set = new Set<string>();
+  const n = g.gridSize;
+  for (const nu of g.pendingNukes) {
+    for (const cell of cellsInRectCenter(nu.col, nu.row, 2, n)) {
+      set.add(cellKey(cell.col, cell.row));
+    }
+  }
+  return [...set];
+}
 
 export function buildGamePayload(g: GameSession, viewerId: string, opts?: BuildGamePayloadOpts) {
   const spectator = opts?.spectatorMode === true;
@@ -1402,6 +1756,13 @@ export function buildGamePayload(g: GameSession, viewerId: string, opts?: BuildG
     matchMode: g.matchMode,
     matchModeLabel: g.matchModeLabel,
     teamSize: g.teamSize,
+    gameRules: {
+      maxHp: g.rules.maxHp,
+      maxStamina: g.rules.maxStamina,
+      restHp: g.rules.restHp,
+      restStamina: g.rules.restStamina,
+      attackDamage: g.rules.attackDamage,
+    },
     roundNumber: g.roundNumber,
     shrinkMargin: g.shrinkMargin,
     turnOf: currentTurnId,
@@ -1436,6 +1797,30 @@ export function buildGamePayload(g: GameSession, viewerId: string, opts?: BuildG
     replayLog: g.replayLog,
     myResumeToken: !spectator && !deadSpectating && me && me.hp > 0 ? me.resumeToken : undefined,
     watchingSpectatorCount: opts?.watchingSpectatorCount ?? 0,
+    nukeWarningKeys: pendingNukeWarningKeys(g),
+    allyLandmineKeys: me
+      ? g.landmines
+          .filter((m) => m.ownerId === viewerId || sameTeam(g, m.ownerId, viewerId))
+          .map((m) => cellKey(m.col, m.row))
+      : [],
+    sonicRadarCells: g.sonicRadars.map((r) => ({
+      id: r.id,
+      col: r.col,
+      row: r.row,
+      hp: r.hp,
+      zoneKeys: cellsInChebyshevDisk(r.col, r.row, 4, g.gridSize).map((c) => cellKey(c.col, c.row)),
+    })),
+    shadowClones: g.shadowClones.map((d) => {
+      const owner = g.players.get(d.ownerId);
+      return {
+        id: d.id,
+        col: d.col,
+        row: d.row,
+        ownerSocketId: d.ownerId,
+        nickname: owner?.nickname ?? "?",
+        avatar: owner?.avatar ?? "",
+      };
+    }),
   };
 }
 
@@ -1609,7 +1994,7 @@ function botFirstStepLeaveUrgentDanger(g: GameSession, actorId: string): { col: 
       const nk = cellKey(nb.col, nb.row);
       if (seen.has(nk)) continue;
       seen.add(nk);
-      prev.set(nk, pk);
+      prev.set(nk, cellKey(pos.col, pos.row));
       if (!danger.has(nk)) {
         let cur = nk;
         while (prev.has(cur)) {
@@ -1755,13 +2140,13 @@ function botTrySkill(
 
   const trySkill = (sk: SkillId, payload: Record<string, unknown>): GameAction | null => {
     if (!p.skills.includes(sk) || !canUseSkill(g, actorId, sk)) return null;
-    if (p.stamina < SKILL_META[sk].cost) return null;
+    if (p.stamina < skillStaminaCost(g, actorId, sk)) return null;
     if (tf.skillIdsUsed.includes(sk)) return null;
     return { kind: "skill", skillId: sk, payload };
   };
 
   if (skillTier !== "basic") {
-    const exe = enemies.filter((e) => manhattan(p, e) === 1 && e.hp <= 6);
+    const exe = enemies.filter((e) => chebyshev(p, e) <= 1 && e.hp <= 6);
     if (exe.length) {
       const low = exe.sort((a, b) => a.hp - b.hp)[0]!;
       const act = trySkill("execute", { targetId: low.socketId });
@@ -1885,7 +2270,7 @@ function chooseHardApexBotAction(g: GameSession, actorId: string): GameAction {
   const pressured = p.hp <= 7 && minD <= 3;
 
   const killAtk = botTryAttack(g, actorId, (arr) => {
-    const fin = arr.filter((e) => e.hp <= ATTACK_DAMAGE);
+    const fin = arr.filter((e) => e.hp <= sessionAttackDamage(g));
     if (fin.length) return fin.sort((a, b) => a.hp - b.hp)[0];
     return arr.sort((a, b) => a.hp - b.hp)[0];
   });
@@ -1922,11 +2307,12 @@ function chooseHardApexBotAction(g: GameSession, actorId: string): GameAction {
     return { kind: "learn", confirmOverwrite: true };
   }
 
-  if (g.beast && g.beast.hp > 0 && p.hp <= 6) {
+  const beastState = g.beast;
+  if (beastState && beastState.hp > 0 && p.hp <= 6) {
     const cells = botWalkNeighbors(g, p.col, p.row);
     const safer = cells.filter((c) => {
       let dmin = 99;
-      for (const k of beastCellKeys(g.beast)) {
+      for (const k of beastCellKeys(beastState)) {
         const b = parseKey(k);
         dmin = Math.min(dmin, manhattan(c, b));
       }
@@ -1951,7 +2337,7 @@ function chooseHardApexBotAction(g: GameSession, actorId: string): GameAction {
     }
   }
   if (
-    p.hp < DEFAULT_HP &&
+    p.hp < sessionMaxHp(g) &&
     !tf.didMove &&
     !tf.didAttack &&
     tf.learnCount === 0 &&
@@ -1996,7 +2382,13 @@ export function chooseBotAction(g: GameSession, actorId: string, difficulty: Bot
         : randomFrom(neigh)!;
       return { kind: "move", path: [dest] };
     }
-    if (p.hp < DEFAULT_HP && !tf.didMove && !tf.didAttack && tf.learnCount === 0 && tf.skillIdsUsed.length === 0) {
+    if (
+      p.hp < sessionMaxHp(g) &&
+      !tf.didMove &&
+      !tf.didAttack &&
+      tf.learnCount === 0 &&
+      tf.skillIdsUsed.length === 0
+    ) {
       return { kind: "rest", mode: "hp" };
     }
     return { kind: "endTurn" };
@@ -2036,7 +2428,7 @@ export function chooseBotAction(g: GameSession, actorId: string, difficulty: Bot
       }
     }
     if (
-      p.hp < DEFAULT_HP &&
+      p.hp < sessionMaxHp(g) &&
       !tf.didMove &&
       !tf.didAttack &&
       tf.learnCount === 0 &&

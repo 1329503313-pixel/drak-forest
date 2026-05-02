@@ -31,6 +31,38 @@ export type BountyPair = {
   roundsLeft: number;
 };
 
+export type ShadowCloneState = {
+  id: string;
+  ownerId: string;
+  col: number;
+  row: number;
+  roundsLeft: number;
+};
+
+export type PendingNukeState = {
+  id: string;
+  ownerId: string;
+  col: number;
+  row: number;
+  placedRound: number;
+};
+
+export type LandmineState = {
+  id: string;
+  ownerId: string;
+  col: number;
+  row: number;
+};
+
+export type SonicRadarState = {
+  id: string;
+  ownerId: string;
+  col: number;
+  row: number;
+  roundsLeft: number;
+  hp: number;
+};
+
 export type MapEventKind = "volcano" | "earthquake" | "rain";
 
 export type MapEventState = {
@@ -104,12 +136,28 @@ export type GamePlayer = {
   deathCause: string | null;
   /** 电脑难度（仅 socketId 为 bot: 前缀时有效） */
   botDifficulty?: BotDifficulty;
+  /** 金钟罩：在该轮内每次受到伤害 -3（含来自玩家的伤害），下一轮有效 */
+  goldenBellForRound: number | null;
+  /** 被金钟罩反隐：该轮结束前持续被全员透视位置 */
+  markedExposeUntilRound: number | null;
+};
+
+/** 单局规则（由房间设置推导，影响引擎数值） */
+export type GameSessionRules = {
+  maxHp: number;
+  maxStamina: number;
+  restHp: number;
+  restStamina: number;
+  attackDamage: number;
+  learnableSkills: SkillId[];
 };
 
 export type GameSession = {
   roomCode: string;
   /** 地图边长：15 / 20 / 25 / 30 */
   gridSize: number;
+  /** 本局数值与技能池 */
+  rules: GameSessionRules;
   matchMode: MatchMode;
   matchModeLabel: string;
   teamSize: number;
@@ -142,6 +190,10 @@ export type GameSession = {
   burningZones: BurningZone[];
   flareZones: FlareZone[];
   bountyPairs: BountyPair[];
+  shadowClones: ShadowCloneState[];
+  pendingNukes: PendingNukeState[];
+  landmines: LandmineState[];
+  sonicRadars: SonicRadarState[];
   /** 当前行动回合内的标记 */
   turnFlags: Map<string, TurnFlags>;
   phase: "playing" | "ended";

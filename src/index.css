@@ -265,6 +265,35 @@ input:focus {
   overflow: hidden;
 }
 
+.home-hub__admin-corner {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  z-index: 3;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(120, 200, 175, 0.14);
+  background: rgba(4, 14, 12, 0.55);
+  box-shadow:
+    0 12px 40px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(110, 210, 255, 0.92);
+  text-decoration: none;
+}
+
+.home-hub__admin-corner:hover {
+  color: rgba(190, 235, 255, 1);
+}
+
+.home-hub__admin-corner:active {
+  opacity: 0.88;
+}
+
 .home-hub__aurora {
   position: absolute;
   inset: -25%;
@@ -676,8 +705,17 @@ input:focus {
   letter-spacing: 0.04em;
 }
 
-.home-hub__rules {
+.home-hub__hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  align-items: center;
   margin-top: 16px;
+}
+
+.home-hub__rules {
+  margin-top: 0;
   padding: 8px 18px;
   border-radius: 999px;
   border: 1px solid rgba(100, 200, 170, 0.35);
@@ -1029,6 +1067,53 @@ input:focus {
   max-height: min(84vh, 680px);
   display: flex;
   flex-direction: column;
+}
+
+.modal--skills {
+  width: min(520px, calc(100vw - 28px));
+  max-height: min(86vh, 720px);
+  display: flex;
+  flex-direction: column;
+}
+
+.skills-guide-list {
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.skills-guide-item {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(120, 200, 175, 0.14);
+  background: rgba(6, 22, 18, 0.45);
+}
+
+.skills-guide-item__title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+
+.skills-guide-item__meta {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: rgba(120, 210, 190, 0.72);
+  letter-spacing: 0.06em;
+}
+
+.skills-guide-item__effect {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-muted);
 }
 
 .rules-content {
@@ -1399,7 +1484,97 @@ input:focus {
 }
 
 .modal--room-settings {
-  width: min(400px, calc(100vw - 28px));
+  width: min(520px, calc(100vw - 28px));
+  max-height: min(92vh, 900px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.room-meta-line__sub {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.room-game-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+  padding: 0 4px 12px;
+  max-height: min(50vh, 420px);
+  overflow-y: auto;
+}
+
+.room-game-settings__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.room-game-settings__field--full {
+  grid-column: 1 / -1;
+}
+
+.room-game-settings__field label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.room-game-settings__field input[type="number"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--tile-border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.room-game-settings__skills {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(40vh, 360px);
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--tile-bg);
+  border: 1px solid var(--tile-border);
+}
+
+.room-game-settings__skills-title {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.room-game-settings__skill-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.room-game-settings__skill-row input {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.room-game-settings__skill-meta {
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .room-code-label {
@@ -2327,6 +2502,24 @@ input:focus {
   background: rgba(80, 30, 15, 0.4) !important;
 }
 
+.game-screen__cell--nuke-warn {
+  box-shadow: inset 0 0 0 2px rgba(255, 70, 70, 0.8) !important;
+  background: rgba(90, 20, 20, 0.4) !important;
+}
+
+.game-screen__cell--landmine-ally {
+  box-shadow: inset 0 0 0 1px rgba(255, 200, 100, 0.45) !important;
+  background: rgba(60, 40, 10, 0.32) !important;
+}
+
+.game-screen__cell--sonic-zone {
+  background: rgba(20, 50, 90, 0.28) !important;
+}
+
+.game-screen__cell--sonic-anchor {
+  box-shadow: inset 0 0 0 2px rgba(80, 160, 255, 0.55) !important;
+}
+
 .game-screen__cell--event-warning {
   box-shadow: inset 0 0 0 2px rgba(255, 76, 76, 0.72) !important;
   background: rgba(92, 26, 26, 0.42) !important;
@@ -2412,6 +2605,22 @@ input:focus {
   pointer-events: none;
   line-height: 1;
   filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
+}
+
+.game-screen__mine-icon {
+  position: absolute;
+  left: 1px;
+  bottom: 0;
+  font-size: clamp(10px, 3cqi, 18px);
+  z-index: 1;
+  pointer-events: none;
+  line-height: 1;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.65));
+}
+
+.game-screen__token--decoy {
+  opacity: 0.78;
+  filter: saturate(0.85);
 }
 
 .game-screen__cell--laser-beam {
@@ -3313,7 +3522,7 @@ input:focus {
 
 .game-screen__skill-modal-inner {
   width: 100%;
-  max-width: 360px;
+  max-width: 420px;
   max-height: min(72vh, 480px);
   overflow: auto;
   background: var(--glass-bg);
@@ -3359,6 +3568,13 @@ input:focus {
 .game-screen__skill-name {
   font-weight: 600;
   font-size: 14px;
+}
+
+.game-screen__skill-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .game-screen__skill-meta {

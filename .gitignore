@@ -1,5 +1,10 @@
 node_modules
 dist
+# tsx 直接跑 .ts；仓库内若存在与 TS 同名的 emit 产物勿提交
+server/**/*.js
+server/**/*.d.ts
+vite.config.js
+vite.config.d.ts
 .DS_Store
 *.log
 server-data
