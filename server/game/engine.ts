@@ -309,7 +309,8 @@ function onTurnStart(g: GameSession, pid: string): void {
       (cell) => cell.col === p.col && cell.row === p.row
     );
     if (inBurn) {
-      const evt = applyDirectDamage(g, z.ownerId, p, 3, "燃烧");
+      /** 与地雷一致：环境伤害，不分阵营（队友、释放者本人在区内也会受伤） */
+      const evt = applyDirectDamage(g, REPLAY_SYSTEM, p, 3, "燃烧");
       if (evt) burnEvents.push(evt);
     }
   }

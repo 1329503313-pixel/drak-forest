@@ -40,7 +40,8 @@ export const SKILL_CATALOG: SkillCatalogEntry[] = [
     id: "burn",
     title: "燃烧弹",
     metaLine: "消耗 6 体力 · 冷却 2 轮 · 主动",
-    effect: "在以锚点为中心的 3×3 区域留下燃烧区两轮；敌方停留在区域内每回合行动开始时受到 3 点伤害。",
+    effect:
+      "在以锚点为中心的 3×3 区域留下燃烧区两轮；停留在区域内的玩家在本人回合行动开始时受到 3 点伤害，对敌方、队友及释放者本人均生效。",
   },
   {
     id: "bounty",
