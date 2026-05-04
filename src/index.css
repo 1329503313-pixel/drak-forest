@@ -2167,7 +2167,7 @@ input:focus {
   padding: 8px 12px;
 }
 
-/* 毒圈：红色高亮预警时，顶部说明下一完整轮次将收缩 */
+/* 毒圈：紫色虚线高亮预警时，顶部说明下一完整轮次将收缩 */
 .game-screen__poison-shrink-banner {
   flex-shrink: 0;
   text-align: center;
@@ -2438,24 +2438,16 @@ input:focus {
   height: 7%;
 }
 
-@keyframes shrink-ring-pulse {
-  0%,
-  100% {
-    box-shadow: inset 0 0 0 2px rgba(200, 55, 55, 0.45);
-    background: rgba(55, 22, 22, 0.35);
-  }
-  50% {
-    box-shadow: inset 0 0 0 3px rgba(255, 75, 75, 0.95);
-    background: rgba(85, 28, 28, 0.5);
-  }
-}
-
-/* 毒圈收缩预警：奇数轮次（第 3 轮起）当前安全区最外圈红色闪烁，下一完整轮次将收圈 */
+/* 毒圈收缩预警：当前安全区最外圈紫色虚线高亮（不闪烁），下一完整轮次将收圈 */
 .game-screen__cell--shrink-warn {
-  animation: shrink-ring-pulse 2.5s ease-in-out infinite;
+  animation: none;
+  outline: 2px dashed rgba(196, 130, 255, 0.92);
+  outline-offset: -1px;
+  background: rgba(72, 38, 102, 0.34);
+  box-shadow: none;
 }
 
-/* 阵营高亮：压过毒圈闪烁、技能 AOE 预览、迷雾底色 */
+/* 阵营高亮：压过毒圈预警描边、技能 AOE 预览、迷雾底色 */
 .game-screen__cell.game-screen__cell--faction-enemy {
   box-shadow: inset 0 0 0 2px rgba(255, 70, 70, 0.92) !important;
   background: rgba(68, 22, 26, 0.5) !important;

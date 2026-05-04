@@ -237,7 +237,7 @@ export function jetReachableKeys(
   return set;
 }
 
-/** 以自身为中心 3×3（切比雪夫距离 ≤1）内的可斩首目标 */
+/** 以自身为中心 3×3（距自身不超过 1 格）内的可斩首目标 */
 export function adjacentEnemyAt(
   state: GameClientState,
   myId: string,

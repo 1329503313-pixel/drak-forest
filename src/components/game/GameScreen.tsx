@@ -37,6 +37,7 @@ import {
 
 const MOVE_STEP_MS = 115;
 const MAX_SKILL_COUNT = 5;
+const LEARN_STAMINA_COST = 3;
 
 const PASSIVE_SKILLS: SkillId[] = ["blade_escape"];
 
@@ -156,6 +157,11 @@ export function GameScreen({
     col: number;
     row: number;
     label: string;
+  } | null>(null);
+  const [learnSuccessModal, setLearnSuccessModal] = useState<{
+    staminaCost: number;
+    skillName: string;
+    overwrittenName?: string;
   } | null>(null);
   const [skillAimPending, setSkillAimPending] = useState<{
     skill: SkillId;
@@ -359,7 +365,7 @@ export function GameScreen({
     return jetReachableKeys(meCol, meRow, n, blocked);
   }, [meOk, meCol, meRow, n, blocked]);
 
-  /** 斩首：以自身为中心的 3×3 可点范围（与服务器切比雪夫 ≤1 一致） */
+  /** 斩首：以自身为中心的 3×3 可点范围（与服务器「距自身不超过 1 格」一致） */
   const executeRangeKeys = useMemo(() => {
     if (!meOk) return new Set<string>();
     const s = new Set<string>();
@@ -622,8 +628,8 @@ export function GameScreen({
   };
 
   const tryLearn = () => {
-    if ((me?.stamina ?? 0) < 3) {
-      onActionError("体力不足，无法学习（需要 3 点体力）");
+    if ((me?.stamina ?? 0) < LEARN_STAMINA_COST) {
+      onActionError(`体力不足，无法学习（需要 ${LEARN_STAMINA_COST} 点体力）`);
       return;
     }
     if (tf.didAttack) {
@@ -649,11 +655,13 @@ export function GameScreen({
       { kind: "learn", confirmOverwrite },
       {
         onOk: (data) => {
-          const learned = data?.learnedSkill?.name;
-          const overwritten = data?.overwrittenSkill?.name;
-          if (learned && overwritten) onActionSuccess?.(`学习获得「${learned}」，随机覆盖「${overwritten}」`);
-          else if (learned) onActionSuccess?.(`学习获得「${learned}」`);
-          else onActionSuccess?.("学习完成");
+          const skillName = data?.learnedSkill?.name ?? "未知技能";
+          const overwrittenName = data?.overwrittenSkill?.name;
+          setLearnSuccessModal({
+            staminaCost: LEARN_STAMINA_COST,
+            skillName,
+            overwrittenName,
+          });
         },
       }
     );
@@ -1162,7 +1170,7 @@ export function GameScreen({
 
       {poisonShrinkBannerActive && (
         <div className="game-screen__poison-shrink-banner" role="status">
-          下一回合红色高亮区域将进行毒圈收缩。
+          下一回合紫色虚线高亮区域将进行毒圈收缩。
         </div>
       )}
 
@@ -1183,6 +1191,28 @@ export function GameScreen({
           {state.mapEvent.phase === "warning"
             ? `事件预警：下一轮「${EVENT_LABELS[state.mapEvent.kind]}」将在高亮区域发生。`
             : `事件发生：「${EVENT_LABELS[state.mapEvent.kind]}」正在影响高亮区域。`}
+        </div>
+      )}
+
+      {learnSuccessModal && (
+        <div className="game-screen__confirm-overlay" role="dialog" aria-modal="true">
+          <div className="game-screen__confirm-box">
+            <p className="game-screen__confirm-text">学习成功</p>
+            <p className="game-screen__confirm-hint">
+              消耗 {learnSuccessModal.staminaCost} 点体力，获得了「{learnSuccessModal.skillName}」技能。
+              {learnSuccessModal.overwrittenName ? (
+                <>
+                  <br />
+                  随机覆盖了「{learnSuccessModal.overwrittenName}」。
+                </>
+              ) : null}
+            </p>
+            <div className="game-screen__confirm-actions game-screen__confirm-actions--center">
+              <button type="button" className="btn-primary" onClick={() => setLearnSuccessModal(null)}>
+                确定
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1877,7 +1907,7 @@ const SKILL_SELECT_DESC: Partial<Record<SkillId, string>> = {
   stealth:
     "无需选格，立刻隐身 2 轮；普攻或多数技能会解除；无直接伤害；消耗 5 体力；冷却 4 轮",
   jet:
-    "点目标空格；切比雪夫 ≤8 的移动；无直接伤害；消耗 3 体力；冷却 1 轮",
+    "点目标空格；最远 8 格方形范围内瞬移（可走八方）；无直接伤害；消耗 3 体力；冷却 1 轮",
   jump:
     "点全图可站立空格跳跃；无直接伤害；消耗 5 体力；冷却 2 轮",
   execute:

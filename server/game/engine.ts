@@ -500,7 +500,7 @@ function preparePoisonWarning(g: GameSession): void {
   const hi = g.gridSize - 1 - m;
   g.poisonWarningKeys = [...outerRingCellKeys(lo, hi)];
   if (g.poisonWarningKeys.length > 0) {
-    appendReplayLog(g, REPLAY_SYSTEM, "毒圈预警：下一轮红色高亮区域将会收缩");
+    appendReplayLog(g, REPLAY_SYSTEM, "毒圈预警：下一轮紫色虚线高亮区域将会收缩");
   }
 }
 
