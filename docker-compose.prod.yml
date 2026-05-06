@@ -1,0 +1,24 @@
+# 生产部署：仅构建并运行应用容器，连接「已在宿主机运行的 MySQL」（例如 /opt/mysql-docker）
+# 用法：在项目根目录准备好 .env 后执行
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# .env 必填：MYSQL_PASSWORD（与应用库用户一致）；建议同时设置 MYSQL_HOST。
+# 默认 MYSQL_HOST=host.docker.internal，通过 extra_hosts 映射到宿主机网关，访问映射在宿主机 3306 的 MySQL。
+
+services:
+  app:
+    build: .
+    image: dark-forest-app:latest
+    restart: unless-stopped
+    ports:
+      - "${APP_PUBLISH_PORT:-80}:3001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      MYSQL_HOST: ${MYSQL_HOST:-host.docker.internal}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER:-darkforest}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-dark_forest}
