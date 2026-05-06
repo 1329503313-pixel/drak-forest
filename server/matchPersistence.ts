@@ -1,12 +1,9 @@
-import fs from "node:fs";
-import path from "node:path";
+import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import type { GameReplayEntry, GameSession } from "./game/gameTypes.js";
 import { buildRanking } from "./game/engine.js";
 import { mapSizeLabel } from "./mapConfig.js";
 import { MATCH_MODE_CONFIGS, type MatchMode } from "./matchModes.js";
-
-const DATA_DIR = path.join(process.cwd(), "server-data");
-const STORE_FILE = path.join(DATA_DIR, "match-store.json");
+import { getPool } from "./db.js";
 
 export type AccountRow = {
   nickname: string;
@@ -38,31 +35,64 @@ export type StoredMatch = {
   replayLog: GameReplayEntry[];
 };
 
-type StoreFile = {
-  accounts: Record<string, AccountRow>;
-  matches: StoredMatch[];
+type MatchRow = RowDataPacket & {
+  match_id: string;
+  ended_at: number;
+  payload: StoredMatch;
 };
 
-function emptyStore(): StoreFile {
-  return { accounts: {}, matches: [] };
+type AccountDbRow = RowDataPacket & {
+  game_account_id: string;
+  nickname: string;
+  avatar: string;
+  updated_at: number;
+};
+
+function normalizeStoredMatch(raw: unknown): StoredMatch | null {
+  if (!raw || typeof raw !== "object") return null;
+  const m = raw as StoredMatch;
+  if (typeof m.matchId !== "string") return null;
+  const gridSize = m.gridSize ?? 15;
+  return {
+    ...m,
+    gridSize,
+    mapSizeLabel: m.mapSizeLabel ?? mapSizeLabel(gridSize),
+    matchMode: m.matchMode ?? "solo",
+    matchModeLabel: m.matchModeLabel ?? MATCH_MODE_CONFIGS[m.matchMode ?? "solo"].label,
+    rankings: Array.isArray(m.rankings) ? m.rankings : [],
+    replayLog: Array.isArray(m.replayLog) ? m.replayLog : [],
+  };
 }
 
-function readStore(): StoreFile {
-  try {
-    const raw = fs.readFileSync(STORE_FILE, "utf-8");
-    const j = JSON.parse(raw) as StoreFile;
-    return {
-      accounts: j.accounts && typeof j.accounts === "object" ? j.accounts : {},
-      matches: Array.isArray(j.matches) ? j.matches : [],
-    };
-  } catch {
-    return emptyStore();
+async function loadAllMatches(): Promise<StoredMatch[]> {
+  const pool = getPool();
+  const [rows] = await pool.query<MatchRow[]>(
+    "SELECT match_id, ended_at, payload FROM matches ORDER BY ended_at DESC"
+  );
+  const out: StoredMatch[] = [];
+  for (const r of rows) {
+    const payload =
+      typeof r.payload === "string" ? (JSON.parse(r.payload) as unknown) : r.payload;
+    const m = normalizeStoredMatch(payload);
+    if (m) out.push(m);
   }
+  return out;
 }
 
-function writeStore(s: StoreFile): void {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(STORE_FILE, JSON.stringify(s), "utf-8");
+async function loadAccountsMap(): Promise<Record<string, AccountRow>> {
+  const pool = getPool();
+  const [rows] = await pool.query<AccountDbRow[]>(
+    "SELECT game_account_id, nickname, avatar, updated_at FROM accounts"
+  );
+  const accounts: Record<string, AccountRow> = {};
+  for (const r of rows) {
+    accounts[r.game_account_id] = {
+      nickname: r.nickname,
+      avatar: r.avatar,
+      updatedAt: Number(r.updated_at),
+    };
+  }
+  return accounts;
 }
 
 /** 2–24 位：字母、数字、中文、下划线、短横线 */
@@ -73,29 +103,41 @@ export function normalizeGameAccountId(raw: unknown): string | null {
   return s;
 }
 
-export function upsertAccount(
+export async function upsertAccount(
   gameAccountId: string,
   nickname: string,
   avatar: string
-): { ok: true } | { ok: false; error: string } {
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const id = normalizeGameAccountId(gameAccountId);
   if (!id) {
     return { ok: false, error: "账号格式无效（2–24 位，字母、数字、中文、下划线或短横线）" };
   }
-  const store = readStore();
-  store.accounts[id] = {
-    nickname: nickname.trim().slice(0, 16) || "猎人",
-    avatar: typeof avatar === "string" ? avatar : "",
-    updatedAt: Date.now(),
-  };
-  writeStore(store);
+  const pool = getPool();
+  const now = Date.now();
+  await pool.execute(
+    `INSERT INTO accounts (game_account_id, nickname, avatar, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE nickname = VALUES(nickname), avatar = VALUES(avatar), updated_at = VALUES(updated_at)`,
+    [id, nickname.trim().slice(0, 16) || "猎人", typeof avatar === "string" ? avatar : "", now]
+  );
   return { ok: true };
 }
 
-export function getAccount(gameAccountId: string): AccountRow | null {
+export async function getAccount(gameAccountId: string): Promise<AccountRow | null> {
   const id = normalizeGameAccountId(gameAccountId);
   if (!id) return null;
-  return readStore().accounts[id] ?? null;
+  const pool = getPool();
+  const [rows] = await pool.query<AccountDbRow[]>(
+    "SELECT nickname, avatar, updated_at FROM accounts WHERE game_account_id = ? LIMIT 1",
+    [id]
+  );
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    nickname: r.nickname,
+    avatar: r.avatar,
+    updatedAt: Number(r.updated_at),
+  };
 }
 
 export type MatchListItem = {
@@ -109,10 +151,10 @@ export type MatchListItem = {
   rankings: StoredMatchRanking[];
 };
 
-export function listMatchesForAccount(gameAccountId: string): MatchListItem[] {
+export async function listMatchesForAccount(gameAccountId: string): Promise<MatchListItem[]> {
   const id = normalizeGameAccountId(gameAccountId);
   if (!id) return [];
-  const { matches } = readStore();
+  const matches = await loadAllMatches();
   return matches
     .filter((m) => m.rankings.some((r) => r.gameAccountId === id))
     .map((m) => {
@@ -131,25 +173,24 @@ export function listMatchesForAccount(gameAccountId: string): MatchListItem[] {
     .sort((a, b) => b.endedAt - a.endedAt);
 }
 
-export function getMatchDetailForAccount(
+export async function getMatchDetailForAccount(
   matchId: string,
   gameAccountId: string
-): StoredMatch | null {
+): Promise<StoredMatch | null> {
   const aid = normalizeGameAccountId(gameAccountId);
   if (!aid) return null;
-  const { matches } = readStore();
-  const m = matches.find((x) => x.matchId === matchId);
-  if (!m || !m.rankings.some((r) => r.gameAccountId === aid)) return null;
-  const gridSize = m.gridSize ?? 15;
-  return {
-    ...m,
-    gridSize,
-    mapSizeLabel: m.mapSizeLabel ?? mapSizeLabel(gridSize),
-    matchMode: m.matchMode ?? "solo",
-    matchModeLabel: m.matchModeLabel ?? MATCH_MODE_CONFIGS[m.matchMode ?? "solo"].label,
-    rankings: Array.isArray(m.rankings) ? m.rankings : [],
-    replayLog: Array.isArray(m.replayLog) ? m.replayLog : [],
-  };
+  const pool = getPool();
+  const [rows] = await pool.query<MatchRow[]>(
+    "SELECT payload FROM matches WHERE match_id = ? LIMIT 1",
+    [matchId]
+  );
+  const r = rows[0];
+  if (!r) return null;
+  const payload =
+    typeof r.payload === "string" ? (JSON.parse(r.payload) as unknown) : r.payload;
+  const m = normalizeStoredMatch(payload);
+  if (!m || !m.rankings.some((x) => x.gameAccountId === aid)) return null;
+  return m;
 }
 
 export type LeaderboardRow = {
@@ -192,15 +233,16 @@ function isBotGameAccountId(id: string): boolean {
   return id.startsWith("bot_");
 }
 
-export function listLeaderboard(): Record<MatchMode, LeaderboardRow[]> {
-  const store = readStore();
+export async function listLeaderboard(): Promise<Record<MatchMode, LeaderboardRow[]>> {
+  const storeMatches = await loadAllMatches();
+  const accounts = await loadAccountsMap();
   const byMode = {} as Record<MatchMode, Map<string, LeaderboardRow>>;
 
   for (const mode of Object.keys(MATCH_MODE_CONFIGS) as MatchMode[]) {
     byMode[mode] = new Map();
   }
 
-  for (const match of store.matches) {
+  for (const match of storeMatches) {
     if (!isValidLeaderboardMatch(match)) continue;
     const mode = match.matchMode ?? "solo";
     const rows = byMode[mode] ?? byMode.solo;
@@ -216,7 +258,7 @@ export function listLeaderboard(): Record<MatchMode, LeaderboardRow[]> {
           games: 0,
           winRate: 0,
         } satisfies LeaderboardRow);
-      const acc = store.accounts[rank.gameAccountId];
+      const acc = accounts[rank.gameAccountId];
       row.nickname = rank.nickname || acc?.nickname || row.nickname;
       row.avatar = rank.avatar || acc?.avatar || row.avatar;
       row.games++;
@@ -240,57 +282,52 @@ export function listLeaderboard(): Record<MatchMode, LeaderboardRow[]> {
 
 export type AccountListEntry = { gameAccountId: string } & AccountRow;
 
-export function listAllAccounts(): AccountListEntry[] {
-  const store = readStore();
-  return Object.entries(store.accounts)
-    .map(([gameAccountId, row]) => ({ gameAccountId, ...row }))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+export async function listAllAccounts(): Promise<AccountListEntry[]> {
+  const pool = getPool();
+  const [rows] = await pool.query<AccountDbRow[]>(
+    "SELECT game_account_id, nickname, avatar, updated_at FROM accounts ORDER BY updated_at DESC"
+  );
+  return rows.map((r) => ({
+    gameAccountId: r.game_account_id,
+    nickname: r.nickname,
+    avatar: r.avatar,
+    updatedAt: Number(r.updated_at),
+  }));
 }
 
-export function deleteAccountById(rawId: string): boolean {
+export async function deleteAccountById(rawId: string): Promise<boolean> {
   const id = normalizeGameAccountId(rawId);
   if (!id) return false;
-  const store = readStore();
-  if (!store.accounts[id]) return false;
-  delete store.accounts[id];
-  writeStore(store);
-  return true;
+  const pool = getPool();
+  const [res] = await pool.execute("DELETE FROM accounts WHERE game_account_id = ?", [id]);
+  return (res as ResultSetHeader).affectedRows > 0;
 }
 
-export function listAllMatchesAdmin(): StoredMatch[] {
-  const store = readStore();
-  return [...store.matches].sort((a, b) => b.endedAt - a.endedAt);
+export async function listAllMatchesAdmin(): Promise<StoredMatch[]> {
+  return loadAllMatches();
 }
 
-export function getMatchByIdAdmin(matchId: string): StoredMatch | null {
-  const store = readStore();
-  const m = store.matches.find((x) => x.matchId === matchId);
-  if (!m) return null;
-  const gridSize = m.gridSize ?? 15;
-  return {
-    ...m,
-    gridSize,
-    mapSizeLabel: m.mapSizeLabel ?? mapSizeLabel(gridSize),
-    matchMode: m.matchMode ?? "solo",
-    matchModeLabel: m.matchModeLabel ?? MATCH_MODE_CONFIGS[m.matchMode ?? "solo"].label,
-    rankings: Array.isArray(m.rankings) ? m.rankings : [],
-    replayLog: Array.isArray(m.replayLog) ? m.replayLog : [],
-  };
+export async function getMatchByIdAdmin(matchId: string): Promise<StoredMatch | null> {
+  const pool = getPool();
+  const [rows] = await pool.query<MatchRow[]>(
+    "SELECT payload FROM matches WHERE match_id = ? LIMIT 1",
+    [matchId]
+  );
+  const r = rows[0];
+  if (!r) return null;
+  const payload =
+    typeof r.payload === "string" ? (JSON.parse(r.payload) as unknown) : r.payload;
+  return normalizeStoredMatch(payload);
 }
 
-export function deleteMatchById(matchId: string): boolean {
-  const store = readStore();
-  const idx = store.matches.findIndex((m) => m.matchId === matchId);
-  if (idx < 0) return false;
-  store.matches.splice(idx, 1);
-  writeStore(store);
-  return true;
+export async function deleteMatchById(matchId: string): Promise<boolean> {
+  const pool = getPool();
+  const [res] = await pool.execute("DELETE FROM matches WHERE match_id = ?", [matchId]);
+  return (res as ResultSetHeader).affectedRows > 0;
 }
 
-export function recordFinishedMatchIfNeeded(g: GameSession): void {
+export async function recordFinishedMatchIfNeeded(g: GameSession): Promise<void> {
   if (g.phase !== "ended") return;
-  const store = readStore();
-  if (store.matches.some((m) => m.matchId === g.matchId)) return;
 
   const rankings = buildRanking(g).map((r) => {
     const pl = g.players.get(r.socketId);
@@ -306,7 +343,7 @@ export function recordFinishedMatchIfNeeded(g: GameSession): void {
   });
 
   const replayLog = JSON.parse(JSON.stringify(g.replayLog)) as GameReplayEntry[];
-  store.matches.push({
+  const stored: StoredMatch = {
     matchId: g.matchId,
     roomCode: g.roomCode,
     endedAt: Date.now(),
@@ -317,6 +354,16 @@ export function recordFinishedMatchIfNeeded(g: GameSession): void {
     finalRoundNumber: g.roundNumber,
     rankings,
     replayLog,
-  });
-  writeStore(store);
+  };
+
+  const pool = getPool();
+  try {
+    await pool.execute(
+      `INSERT INTO matches (match_id, ended_at, payload) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE match_id = match_id`,
+      [g.matchId, stored.endedAt, JSON.stringify(stored)]
+    );
+  } catch (e) {
+    console.error("[matchPersistence] 写入对局记录失败:", e);
+  }
 }

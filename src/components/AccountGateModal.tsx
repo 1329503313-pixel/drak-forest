@@ -7,6 +7,7 @@ type Props = {
   submitting: boolean;
   error: string | null;
   onSubmit: (payload: { gameAccountId: string; nickname: string; avatar: string }) => void;
+  onClose: () => void;
 };
 
 export function AccountGateModal({
@@ -16,6 +17,7 @@ export function AccountGateModal({
   submitting,
   error,
   onSubmit,
+  onClose,
 }: Props) {
   const [account, setAccount] = useState("");
 
@@ -37,8 +39,20 @@ export function AccountGateModal({
 
   return (
     <div className="overlay overlay--blocking" role="dialog" aria-modal="true" aria-labelledby="account-gate-title">
-      <div className="modal modal--account">
-        <h3 id="account-gate-title">请输入你的游戏账号</h3>
+      <div className="modal modal--account" onClick={(e) => e.stopPropagation()}>
+        <div className="account-gate__head">
+          <h3 id="account-gate-title">请输入你的游戏账号</h3>
+          <button
+            type="button"
+            className="account-gate__close"
+            onClick={onClose}
+            disabled={submitting}
+            aria-label="关闭"
+            title="关闭"
+          >
+            ×
+          </button>
+        </div>
         <p className="modal-hint">
           游戏账号会绑定你的昵称、头像和对局记录。若账号已存在，将自动读取该账号资料；若是新账号，会直接创建。
         </p>

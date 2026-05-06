@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import { Server, type Socket } from "socket.io";
@@ -36,11 +37,15 @@ import { mapSizeLabel, normalizeGridSize, type AllowedGridSize } from "./mapConf
 import { matchModeConfig, normalizeMatchMode, type MatchMode } from "./matchModes.js";
 import { botAvatarDataUrl } from "./botAvatar.js";
 import { ensureDefaultAdmins } from "./adminAuthStore.js";
+import { initDb } from "./db.js";
 import { mountAdminApi } from "./adminRoutes.js";
 import {
   normalizeRoomGameSettings,
   type RoomGameSettings,
 } from "./roomGameSettings.js";
+
+await initDb();
+await ensureDefaultAdmins();
 
 const MIN_PLAYERS_TO_START = 2;
 /** 大厅观战席固定数量 */
@@ -122,7 +127,7 @@ function notifyClientRoomGone(socket: Socket): void {
 function broadcastGameState(roomCode: string) {
   const g = games.get(roomCode);
   if (!g) return;
-  recordFinishedMatchIfNeeded(g);
+  void recordFinishedMatchIfNeeded(g);
   const room = rooms.get(roomCode);
   if (!room) return;
   const av = roomAvatarMap(room);
@@ -467,9 +472,9 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "2mb" }));
 
-app.post("/api/account/register", (req, res) => {
+app.post("/api/account/register", async (req, res) => {
   const body = req.body as { gameAccountId?: string; nickname?: string; avatar?: string };
-  const r = upsertAccount(
+  const r = await upsertAccount(
     String(body?.gameAccountId ?? ""),
     String(body?.nickname ?? ""),
     typeof body?.avatar === "string" ? body.avatar : ""
@@ -481,13 +486,13 @@ app.post("/api/account/register", (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/account/:id", (req, res) => {
+app.get("/api/account/:id", async (req, res) => {
   const id = normalizeGameAccountId(decodeURIComponent(req.params.id));
   if (!id) {
     res.status(400).json({ error: "无效账号" });
     return;
   }
-  const row = getAccount(id);
+  const row = await getAccount(id);
   if (!row) {
     res.status(404).json({ error: "账号不存在" });
     return;
@@ -495,26 +500,26 @@ app.get("/api/account/:id", (req, res) => {
   res.json({ gameAccountId: id, nickname: row.nickname, avatar: row.avatar, updatedAt: row.updatedAt });
 });
 
-app.get("/api/matches", (req, res) => {
+app.get("/api/matches", async (req, res) => {
   const account = normalizeGameAccountId(String(req.query.account ?? ""));
   if (!account) {
     res.status(400).json({ error: "缺少或无效的 account 参数" });
     return;
   }
-  res.json({ matches: listMatchesForAccount(account) });
+  res.json({ matches: await listMatchesForAccount(account) });
 });
 
-app.get("/api/leaderboard", (_req, res) => {
-  res.json({ leaderboard: listLeaderboard() });
+app.get("/api/leaderboard", async (_req, res) => {
+  res.json({ leaderboard: await listLeaderboard() });
 });
 
-app.get("/api/match/:matchId", (req, res) => {
+app.get("/api/match/:matchId", async (req, res) => {
   const account = normalizeGameAccountId(String(req.query.account ?? ""));
   if (!account) {
     res.status(400).json({ error: "缺少或无效的 account 参数" });
     return;
   }
-  const detail = getMatchDetailForAccount(req.params.matchId, account);
+  const detail = await getMatchDetailForAccount(req.params.matchId, account);
   if (!detail) {
     res.status(404).json({ error: "未找到对局或无权查看" });
     return;
@@ -536,7 +541,7 @@ function forceEndGameByAdmin(roomCode: string): boolean {
   g.phase = "ended";
   g.winnerId = null;
   clearTurnTimer(roomCode);
-  recordFinishedMatchIfNeeded(g);
+  void recordFinishedMatchIfNeeded(g);
   broadcastGameState(roomCode);
   return true;
 }
@@ -580,7 +585,6 @@ function getAdminGameState(roomCodeRaw: string): ReturnType<typeof buildGamePayl
   });
 }
 
-ensureDefaultAdmins();
 mountAdminApi(app, {
   getRoomsSnapshot,
   getGamesSnapshot,
@@ -691,7 +695,7 @@ function scheduleTurnTimer(roomCode: string): void {
 io.on("connection", (socket) => {
   socket.on(
     "room:create",
-    (
+    async (
       data: { nickname: string; avatar: string; gameAccountId: string; gridSize?: number; code?: string; matchMode?: string },
       cb: (err: string | null, state?: ReturnType<typeof roomPayload>) => void
     ) => {
@@ -700,7 +704,7 @@ io.on("connection", (socket) => {
         cb("请先登录游戏账号");
         return;
       }
-      if (!getAccount(gid)) {
+      if (!(await getAccount(gid))) {
         cb("游戏账号无效，请先在首页完成账号登记");
         return;
       }
@@ -741,7 +745,7 @@ io.on("connection", (socket) => {
 
   socket.on(
     "room:join",
-    (
+    async (
       data: { code: string; nickname: string; avatar: string; gameAccountId: string },
       cb: (err: string | null, state?: ReturnType<typeof roomPayload>) => void
     ) => {
@@ -750,7 +754,7 @@ io.on("connection", (socket) => {
         cb("请先登录游戏账号");
         return;
       }
-      if (!getAccount(gid)) {
+      if (!(await getAccount(gid))) {
         cb("游戏账号无效，请先在首页完成账号登记");
         return;
       }

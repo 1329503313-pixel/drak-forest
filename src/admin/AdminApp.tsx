@@ -4,7 +4,6 @@ import type { LeaderboardByMode, MatchHistoryItem } from "@/types/match";
 import {
   adminFetch,
   clearAdminToken,
-  fetchAdminStatus,
   loadAdminToken,
   loginAdmin,
   logoutAdmin,
@@ -64,7 +63,6 @@ export default function AdminApp() {
   const [loginPassword, setLoginPassword] = useState("");
   const [currentUsername, setCurrentUsername] = useState<string | null>(null);
   const [authorized, setAuthorized] = useState(false);
-  const [statusHint, setStatusHint] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>("overview");
@@ -76,6 +74,7 @@ export default function AdminApp() {
   const [createPassword, setCreatePassword] = useState("");
   const [adminList, setAdminList] = useState<AdminUserRow[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [accountsBusy, setAccountsBusy] = useState(false);
   const [spectateRoomCode, setSpectateRoomCode] = useState<string | null>(null);
   const [replayMatchId, setReplayMatchId] = useState<string | null>(null);
 
@@ -194,13 +193,6 @@ export default function AdminApp() {
   }, [loginUsername, loginPassword]);
 
   useEffect(() => {
-    void (async () => {
-      const st = await fetchAdminStatus();
-      if (st.hint) setStatusHint(st.hint);
-    })();
-  }, []);
-
-  useEffect(() => {
     const t = loadAdminToken();
     if (!t) return;
     setLoading(true);
@@ -242,6 +234,7 @@ export default function AdminApp() {
       return;
     }
     setError(null);
+    setAccountsBusy(true);
     try {
       await adminFetch("/change-password", {
         method: "POST",
@@ -251,16 +244,18 @@ export default function AdminApp() {
       setOldPassword("");
       setNewPassword("");
       setNewPassword2("");
-      setError(null);
       setNotice("密码已更新");
       window.setTimeout(() => setNotice(null), 3200);
     } catch (e) {
       setError(e instanceof Error ? e.message : "修改失败");
+    } finally {
+      setAccountsBusy(false);
     }
   };
 
   const submitCreateAdmin = async () => {
     setError(null);
+    setAccountsBusy(true);
     try {
       await adminFetch("/admins", {
         method: "POST",
@@ -269,11 +264,19 @@ export default function AdminApp() {
       });
       setCreateUsername("");
       setCreatePassword("");
-      await refreshAdminList();
+      try {
+        await refreshAdminList();
+      } catch {
+        setNotice("已创建管理员（列表刷新失败，可点击顶部「刷新」）");
+        window.setTimeout(() => setNotice(null), 4200);
+        return;
+      }
       setNotice("已创建管理员");
       window.setTimeout(() => setNotice(null), 3200);
     } catch (e) {
       setError(e instanceof Error ? e.message : "创建失败");
+    } finally {
+      setAccountsBusy(false);
     }
   };
 
@@ -361,9 +364,6 @@ export default function AdminApp() {
         {!authorized ? (
           <div className="admin-login">
             <h2>管理员登录</h2>
-            <p>
-              使用管理员账号与密码登录。{statusHint ? ` ${statusHint}` : ""}
-            </p>
             <label className="admin-label" htmlFor="admin-login-user">
               账号
             </label>
@@ -393,11 +393,6 @@ export default function AdminApp() {
                 {loading ? "登录中…" : "进入后台"}
               </button>
             </div>
-            <p className="admin-muted" style={{ marginTop: 16 }}>
-              首次部署且无管理员数据时，会自动创建默认账号{" "}
-              <span className="admin-code">admin</span> /{" "}
-              <span className="admin-code">123456</span>（请在登录后尽快修改密码）。
-            </p>
           </div>
         ) : (
           <>
@@ -450,7 +445,7 @@ export default function AdminApp() {
                     </div>
                   </div>
                   <p className="admin-hint" style={{ marginTop: 16 }}>
-                    「进行中对局」与房间来自内存；「对局记录」与排行榜来自持久化文件 server-data/match-store.json。
+                    「进行中对局」与房间来自内存；「对局记录」、排行榜与登记账号由服务端写入 MySQL 持久化。
                   </p>
                 </>
               )}
@@ -645,8 +640,7 @@ export default function AdminApp() {
                   <h2>管理员账号</h2>
                   {notice ? <p className="admin-notice">{notice}</p> : null}
                   <p className="admin-hint">
-                    修改当前账号密码，或新建其他管理员（新密码至少 6 位）。管理员数据保存在服务端{" "}
-                    <span className="admin-code">server-data/admins.json</span>。
+                    修改当前登录管理员密码，或新建其他管理员账号（用户名 1–32 位，密码至少 6 位）。数据保存在服务端 MySQL。
                   </p>
 
                   <h3 className="admin-subheading">修改密码</h3>
@@ -673,8 +667,14 @@ export default function AdminApp() {
                       onChange={(e) => setNewPassword2(e.target.value)}
                     />
                   </div>
-                  <button type="button" className="btn-primary" style={{ marginTop: 12 }} onClick={() => void submitChangePassword()}>
-                    保存新密码
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    style={{ marginTop: 12 }}
+                    disabled={accountsBusy}
+                    onClick={() => void submitChangePassword()}
+                  >
+                    {accountsBusy ? "处理中…" : "保存新密码"}
                   </button>
 
                   <h3 className="admin-subheading" style={{ marginTop: 28 }}>
@@ -697,8 +697,14 @@ export default function AdminApp() {
                       onChange={(e) => setCreatePassword(e.target.value)}
                     />
                   </div>
-                  <button type="button" className="btn-primary" style={{ marginTop: 12 }} onClick={() => void submitCreateAdmin()}>
-                    创建管理员
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    style={{ marginTop: 12 }}
+                    disabled={accountsBusy}
+                    onClick={() => void submitCreateAdmin()}
+                  >
+                    {accountsBusy ? "处理中…" : "创建管理员"}
                   </button>
 
                   <h3 className="admin-subheading" style={{ marginTop: 28 }}>

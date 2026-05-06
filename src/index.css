@@ -1046,6 +1046,52 @@ input:focus {
   width: min(400px, calc(100vw - 28px));
 }
 
+.account-gate__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.modal--account > .account-gate__head + .modal-hint {
+  margin-top: -4px;
+}
+
+.account-gate__head h3 {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.account-gate__close {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  margin: -6px -8px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  font-size: 22px;
+  line-height: 1;
+  color: rgba(180, 220, 205, 0.85);
+  background: rgba(8, 28, 22, 0.55);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.account-gate__close:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(18, 52, 42, 0.65);
+}
+
+.account-gate__close:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .modal--history {
   width: min(440px, calc(100vw - 28px));
   max-height: min(82vh, 560px);

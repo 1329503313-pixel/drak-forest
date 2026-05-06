@@ -45,9 +45,29 @@ export async function logoutAdmin(): Promise<void> {
 
 export async function adminFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const token = loadAdminToken();
-  const headers = new Headers(init?.headers);
+  const headers = new Headers();
+  if (init?.headers != null) {
+    new Headers(init.headers).forEach((value, key) => {
+      headers.set(key, value);
+    });
+  }
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const res = await fetch(`/api/admin${path}`, { ...init, headers });
+
+  const res = await fetch(`/api/admin${path}`, {
+    method: init?.method ?? "GET",
+    headers,
+    body: init?.body ?? null,
+    signal: init?.signal,
+    credentials: init?.credentials ?? "same-origin",
+    cache: init?.cache,
+    redirect: init?.redirect,
+    referrer: init?.referrer,
+    referrerPolicy: init?.referrerPolicy,
+    integrity: init?.integrity,
+    keepalive: init?.keepalive,
+    mode: init?.mode,
+  });
+
   if (res.status === 401) {
     const err = new Error("UNAUTHORIZED") as Error & { code?: string };
     err.code = "UNAUTHORIZED";
@@ -58,5 +78,7 @@ export async function adminFetch<T = unknown>(path: string, init?: RequestInit):
     throw new Error(j.error || res.statusText);
   }
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  const text = await res.text();
+  if (!text.trim()) return undefined as T;
+  return JSON.parse(text) as T;
 }

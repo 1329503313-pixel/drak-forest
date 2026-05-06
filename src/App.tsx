@@ -17,7 +17,6 @@ import { randomFruitName } from "@/utils/fruits";
 import { clearGameAccount, loadGameAccount, saveGameAccount } from "@/utils/gameAccount";
 import { clearGameResume, readGameResume, saveGameResume } from "@/utils/gameSession";
 import { fetchAccountProfile, registerAccountApi } from "@/utils/matchApi";
-import { loadAvatar, loadNickname, saveAvatar, saveNickname } from "@/utils/storage";
 
 function useSocket(): Socket {
   return useMemo(() => {
@@ -33,8 +32,9 @@ function useSocket(): Socket {
 export default function App() {
   const socket = useSocket();
 
-  const [nickname, setNickname] = useState(() => loadNickname() || randomFruitName());
-  const [avatar, setAvatar] = useState(() => normalizeAvatarUrl(loadAvatar()));
+  /** 昵称与头像仅与已登录游戏账号对应，来自服务端 accounts 表，不做本地持久化 */
+  const [nickname, setNickname] = useState("");
+  const [avatar, setAvatar] = useState(() => DEFAULT_AVATAR);
 
   const [room, setRoom] = useState<RoomState | null>(null);
   const [myId, setMyId] = useState<string>("");
@@ -61,6 +61,8 @@ export default function App() {
   const [loggedInAccountId, setLoggedInAccountId] = useState<string | null>(null);
   const [accountSubmitting, setAccountSubmitting] = useState(false);
   const [accountGateError, setAccountGateError] = useState<string | null>(null);
+  /** 用户主动关闭账号弹窗后，可先看规则/排行等，稍后在顶部点「登录账号」再填 */
+  const [accountGateDismissed, setAccountGateDismissed] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
@@ -224,6 +226,15 @@ export default function App() {
   }, [toast]);
 
   useEffect(() => {
+    try {
+      localStorage.removeItem("df_nickname");
+      localStorage.removeItem("df_avatar");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     void (async () => {
       const id = loadGameAccount();
@@ -235,20 +246,22 @@ export default function App() {
         const profile = await fetchAccountProfile(id);
         if (cancelled) return;
         if (profile) {
-          setNickname(profile.nickname);
-          saveNickname(profile.nickname);
-          const nextAvatar = normalizeAvatarUrl(profile.avatar);
-          setAvatar(nextAvatar);
-          saveAvatar(nextAvatar);
+          setNickname(profile.nickname.trim() || "猎人");
+          setAvatar(normalizeAvatarUrl(profile.avatar));
           setLoggedInAccountId(id);
         } else {
           clearGameAccount();
           setLoggedInAccountId(null);
+          setNickname("");
+          setAvatar(DEFAULT_AVATAR);
         }
       } catch {
         if (!cancelled) {
           setToast("无法校验账号，请检查网络后重试");
-          setLoggedInAccountId(id);
+          clearGameAccount();
+          setLoggedInAccountId(null);
+          setNickname("");
+          setAvatar(DEFAULT_AVATAR);
         }
       } finally {
         if (!cancelled) setSessionReady(true);
@@ -265,30 +278,28 @@ export default function App() {
   };
 
   const confirmNick = () => {
-    const next = nickDraft.trim() || nickname;
-    setNickname(next);
-    saveNickname(next);
-    setNickOpen(false);
-    if (loggedInAccountId) {
-      void registerAccountApi({ gameAccountId: loggedInAccountId, nickname: next, avatar }).catch(() =>
-        setToast("同步昵称到账号失败")
-      );
-    }
-    if (room) {
-      socket.emit("room:syncProfile", { nickname: next }, () => undefined);
-    }
+    if (!loggedInAccountId) return;
+    const next = nickDraft.trim() || nickname.trim() || randomFruitName();
+    void (async () => {
+      try {
+        await registerAccountApi({ gameAccountId: loggedInAccountId, nickname: next, avatar });
+        setNickname(next);
+        setNickOpen(false);
+        if (room) socket.emit("room:syncProfile", { nickname: next }, () => undefined);
+      } catch {
+        setToast("同步昵称到账号失败");
+      }
+    })();
   };
 
-  const applyUploadedAvatar = (dataUrl: string) => {
-    setAvatar(dataUrl);
-    saveAvatar(dataUrl);
-    if (loggedInAccountId) {
-      void registerAccountApi({ gameAccountId: loggedInAccountId, nickname, avatar: dataUrl }).catch(() =>
-        setToast("同步头像到账号失败")
-      );
-    }
-    if (room) {
-      socket.emit("room:syncProfile", { avatar: dataUrl }, () => undefined);
+  const applyUploadedAvatar = async (dataUrl: string) => {
+    if (!loggedInAccountId) return;
+    try {
+      await registerAccountApi({ gameAccountId: loggedInAccountId, nickname, avatar: dataUrl });
+      setAvatar(normalizeAvatarUrl(dataUrl));
+      if (room) socket.emit("room:syncProfile", { avatar: dataUrl }, () => undefined);
+    } catch {
+      setToast("同步头像到账号失败");
     }
   };
 
@@ -321,6 +332,7 @@ export default function App() {
 
   const openCreateRoomModal = () => {
     if (!loggedInAccountId) {
+      setAccountGateDismissed(false);
       setToast("请先登录游戏账号");
       return;
     }
@@ -403,6 +415,7 @@ export default function App() {
     }
     const gid = loggedInAccountId;
     if (!gid) {
+      setAccountGateDismissed(false);
       setToast("请先登录游戏账号");
       return;
     }
@@ -489,7 +502,9 @@ export default function App() {
 
   const isHost = room && room.hostId === myId;
 
-  const showAccountGate = sessionReady && !loggedInAccountId;
+  const hubDisplayName = loggedInAccountId ? nickname.trim() || "猎人" : "访客";
+
+  const showAccountGate = sessionReady && !loggedInAccountId && !accountGateDismissed;
 
   const onAccountGateSubmit = async (payload: { gameAccountId: string; nickname: string; avatar: string }) => {
     setAccountSubmitting(true);
@@ -497,20 +512,22 @@ export default function App() {
     try {
       const gameAccountId = payload.gameAccountId.trim();
       const existing = await fetchAccountProfile(gameAccountId);
-      const profile = existing ?? {
-        gameAccountId,
-        nickname: payload.nickname,
-        avatar: payload.avatar,
-      };
       if (!existing) {
-        await registerAccountApi(profile);
+        const nickDefault = payload.nickname.trim() || randomFruitName();
+        const avatarNorm = normalizeAvatarUrl(payload.avatar);
+        await registerAccountApi({
+          gameAccountId,
+          nickname: nickDefault,
+          avatar: avatarNorm,
+        });
       }
       saveGameAccount(gameAccountId);
-      saveNickname(profile.nickname);
-      saveAvatar(profile.avatar);
-      setNickname(profile.nickname);
-      setAvatar(profile.avatar);
+      const fresh = await fetchAccountProfile(gameAccountId);
+      if (!fresh) throw new Error("登记后无法读取账号资料");
+      setNickname(fresh.nickname.trim() || "猎人");
+      setAvatar(normalizeAvatarUrl(fresh.avatar));
       setLoggedInAccountId(gameAccountId);
+      setAccountGateDismissed(false);
     } catch (e) {
       setAccountGateError(e instanceof Error ? e.message : "登记失败");
     } finally {
@@ -520,6 +537,9 @@ export default function App() {
 
   const logout = () => {
     clearGameAccount();
+    setNickname("");
+    setAvatar(DEFAULT_AVATAR);
+    setAccountGateDismissed(false);
     setLoggedInAccountId(null);
     setActiveGamePrompt(null);
     activeGameCheckedForRef.current = null;
@@ -553,7 +573,7 @@ export default function App() {
             disabled={!loggedInAccountId}
           >
             {room && isHost && <span className="crown-badge">👑</span>}
-            <PlayerAvatarFrame src={avatar || DEFAULT_AVATAR} alt="" variant="fill" />
+            <PlayerAvatarFrame src={avatar} alt="" variant="fill" />
           </button>
           <input
             ref={avatarFileInputRef}
@@ -566,8 +586,8 @@ export default function App() {
           />
           <div className="home-hub__who">
             <span className="home-hub__who-label">昵称</span>
-            <span className="home-hub__who-name" title={nickname}>
-              {nickname}
+            <span className="home-hub__who-name" title={hubDisplayName}>
+              {hubDisplayName}
             </span>
             {loggedInAccountId ? (
               <div className="home-hub__who-actions" role="group" aria-label="账号操作">
@@ -579,6 +599,12 @@ export default function App() {
                 </span>
                 <button type="button" className="home-hub__mini home-hub__mini--muted" onClick={logout}>
                   退出
+                </button>
+              </div>
+            ) : accountGateDismissed ? (
+              <div className="home-hub__who-actions" role="group" aria-label="账号登录">
+                <button type="button" className="home-hub__mini" onClick={() => setAccountGateDismissed(false)}>
+                  登录账号
                 </button>
               </div>
             ) : (
@@ -673,6 +699,10 @@ export default function App() {
         submitting={accountSubmitting}
         error={accountGateError}
         onSubmit={onAccountGateSubmit}
+        onClose={() => {
+          setAccountGateDismissed(true);
+          setAccountGateError(null);
+        }}
       />
 
       {loggedInAccountId ? (

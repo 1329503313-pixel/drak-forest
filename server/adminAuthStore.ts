@@ -1,43 +1,22 @@
-import fs from "node:fs";
-import path from "node:path";
+import type { RowDataPacket } from "mysql2";
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-
-const DATA_DIR = path.join(process.cwd(), "server-data");
-const ADMINS_FILE = path.join(DATA_DIR, "admins.json");
+import { getPool } from "./db.js";
 
 const DEFAULT_ADMIN_USER = "admin";
 const DEFAULT_ADMIN_PASS = "123456";
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-type AdminRecord = {
-  id: string;
-  username: string;
-  passwordHash: string;
-  salt: string;
-  createdAt: number;
-};
-
-type AdminsFile = { version: 1; admins: AdminRecord[] };
-
 type Session = { adminId: string; username: string; expiresAt: number };
 const sessions = new Map<string, Session>();
 
-function readFile(): AdminsFile {
-  try {
-    const raw = fs.readFileSync(ADMINS_FILE, "utf-8");
-    const j = JSON.parse(raw) as AdminsFile;
-    if (j.version !== 1 || !Array.isArray(j.admins)) return { version: 1, admins: [] };
-    return j;
-  } catch {
-    return { version: 1, admins: [] };
-  }
-}
-
-function writeFile(data: AdminsFile): void {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(ADMINS_FILE, JSON.stringify(data, null, 0), "utf-8");
-}
+type AdminDbRow = RowDataPacket & {
+  id: string;
+  username: string;
+  password_hash: string;
+  salt: string;
+  created_at: number;
+};
 
 function hashPassword(plain: string): { passwordHash: string; salt: string } {
   const salt = randomBytes(16).toString("hex");
@@ -66,28 +45,34 @@ function pruneSessions(): void {
   }
 }
 
-export function ensureDefaultAdmins(): void {
-  const data = readFile();
-  if (data.admins.length > 0) return;
+export async function ensureDefaultAdmins(): Promise<void> {
+  const pool = getPool();
+  const [rows] = await pool.query<RowDataPacket[]>("SELECT COUNT(*) AS c FROM admins");
+  const c = Number((rows[0] as { c: number }).c) || 0;
+  if (c > 0) return;
   const { passwordHash, salt } = hashPassword(DEFAULT_ADMIN_PASS);
-  data.admins.push({
-    id: randomUUID(),
-    username: DEFAULT_ADMIN_USER,
-    passwordHash,
-    salt,
-    createdAt: Date.now(),
-  });
-  writeFile(data);
+  const id = randomUUID();
+  await pool.execute(
+    `INSERT INTO admins (id, username, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [id, DEFAULT_ADMIN_USER, passwordHash, salt, Date.now()]
+  );
 }
 
-export function tryLogin(usernameRaw: unknown, passwordRaw: unknown): { token: string; username: string } | null {
+export async function tryLogin(
+  usernameRaw: unknown,
+  passwordRaw: unknown
+): Promise<{ token: string; username: string } | null> {
   const username = normalizeUsername(usernameRaw);
   const password = String(passwordRaw ?? "");
   if (!username || password.length < 1) return null;
-  ensureDefaultAdmins();
-  const data = readFile();
-  const admin = data.admins.find((a) => a.username === username);
-  if (!admin || !verifyPassword(password, admin.passwordHash, admin.salt)) return null;
+  await ensureDefaultAdmins();
+  const pool = getPool();
+  const [rows] = await pool.query<AdminDbRow[]>(
+    "SELECT id, username, password_hash, salt FROM admins WHERE username = ? LIMIT 1",
+    [username]
+  );
+  const admin = rows[0];
+  if (!admin || !verifyPassword(password, admin.password_hash, admin.salt)) return null;
   pruneSessions();
   const token = randomBytes(32).toString("hex");
   sessions.set(token, {
@@ -116,61 +101,76 @@ export function validateSession(token: string | undefined): { adminId: string; u
 
 export type AdminPublic = { id: string; username: string; createdAt: number };
 
-export function listAdminUsers(): AdminPublic[] {
-  ensureDefaultAdmins();
-  return readFile().admins
-    .map((a) => ({ id: a.id, username: a.username, createdAt: a.createdAt }))
-    .sort((a, b) => a.username.localeCompare(b.username, "zh-CN"));
+export async function listAdminUsers(): Promise<AdminPublic[]> {
+  await ensureDefaultAdmins();
+  const pool = getPool();
+  const [rows] = await pool.query<AdminDbRow[]>(
+    "SELECT id, username, created_at FROM admins ORDER BY username ASC"
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    username: r.username,
+    createdAt: Number(r.created_at),
+  }));
 }
 
-export function changeAdminPassword(
+export async function changeAdminPassword(
   adminId: string,
   oldPassword: unknown,
   newPassword: unknown
-): { ok: true } | { ok: false; error: string } {
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const oldP = String(oldPassword ?? "");
   const newP = String(newPassword ?? "");
   if (newP.length < 6) return { ok: false, error: "新密码至少 6 位" };
   if (newP.length > 128) return { ok: false, error: "新密码过长" };
-  const data = readFile();
-  const admin = data.admins.find((a) => a.id === adminId);
+  const pool = getPool();
+  const [rows] = await pool.query<AdminDbRow[]>(
+    "SELECT id, password_hash, salt FROM admins WHERE id = ? LIMIT 1",
+    [adminId]
+  );
+  const admin = rows[0];
   if (!admin) return { ok: false, error: "用户不存在" };
-  if (!verifyPassword(oldP, admin.passwordHash, admin.salt)) {
+  if (!verifyPassword(oldP, admin.password_hash, admin.salt)) {
     return { ok: false, error: "原密码错误" };
   }
   const { passwordHash, salt } = hashPassword(newP);
-  admin.passwordHash = passwordHash;
-  admin.salt = salt;
-  writeFile(data);
+  await pool.execute(
+    "UPDATE admins SET password_hash = ?, salt = ? WHERE id = ?",
+    [passwordHash, salt, adminId]
+  );
   return { ok: true };
 }
 
-export function createAdminUser(
+export async function createAdminUser(
   actorAdminId: string,
   usernameRaw: unknown,
   passwordRaw: unknown
-): { ok: true } | { ok: false; error: string } {
-  ensureDefaultAdmins();
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  await ensureDefaultAdmins();
   const username = normalizeUsername(usernameRaw);
   const password = String(passwordRaw ?? "");
   if (!username) return { ok: false, error: "用户名 1–32 位，支持字母数字中文._-" };
   if (password.length < 6) return { ok: false, error: "密码至少 6 位" };
   if (password.length > 128) return { ok: false, error: "密码过长" };
-  const data = readFile();
-  if (!data.admins.some((a) => a.id === actorAdminId)) {
+  const pool = getPool();
+  const [actors] = await pool.query<RowDataPacket[]>(
+    "SELECT id FROM admins WHERE id = ? LIMIT 1",
+    [actorAdminId]
+  );
+  if (!actors[0]) {
     return { ok: false, error: "无权操作" };
   }
-  if (data.admins.some((a) => a.username === username)) {
+  const [dup] = await pool.query<RowDataPacket[]>(
+    "SELECT id FROM admins WHERE username = ? LIMIT 1",
+    [username]
+  );
+  if (dup[0]) {
     return { ok: false, error: "用户名已存在" };
   }
   const { passwordHash, salt } = hashPassword(password);
-  data.admins.push({
-    id: randomUUID(),
-    username,
-    passwordHash,
-    salt,
-    createdAt: Date.now(),
-  });
-  writeFile(data);
+  await pool.execute(
+    `INSERT INTO admins (id, username, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [randomUUID(), username, passwordHash, salt, Date.now()]
+  );
   return { ok: true };
 }
