@@ -9,11 +9,19 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
+function readVisualSize(): { vw: number; vh: number } {
+  if (typeof window === "undefined") return { vw: 390, vh: 700 };
+  const vv = window.visualViewport;
+  if (vv && vv.width > 0 && vv.height > 0) {
+    return { vw: vv.width, vh: vv.height };
+  }
+  return { vw: window.innerWidth, vh: window.innerHeight };
+}
+
 /** 根据窗口尺寸计算地图方形视口边长（为大屏 / iPad 放大可玩区域） */
 export function computeMapViewportBasePx(): number {
   if (typeof window === "undefined") return MAP_VIEWPORT_PX;
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
+  const { vw, vh } = readVisualSize();
   const reserveY = clamp(Math.round(vh * 0.38), 260, 400);
   const maxSquare = Math.min(vw - 20, vh - reserveY);
   let side = clamp(Math.floor(maxSquare), MAP_VIEWPORT_PX_MIN, MAP_VIEWPORT_PX_MAX);
@@ -31,7 +39,14 @@ export function useMapViewportBasePx(): number {
     const update = () => setPx(computeMapViewportBasePx());
     update();
     window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", update);
+    vv?.addEventListener("scroll", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      vv?.removeEventListener("resize", update);
+      vv?.removeEventListener("scroll", update);
+    };
   }, []);
 
   return px;

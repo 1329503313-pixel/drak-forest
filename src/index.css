@@ -36,6 +36,13 @@
   box-sizing: border-box;
 }
 
+html {
+  height: 100%;
+  /* 微信 / 部分 Android WebView 会擅自调字号导致布局错位 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 html,
 body {
   margin: 0;
@@ -45,6 +52,11 @@ body {
   color: var(--text);
   font-family: inherit;
   -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  overflow-x: hidden;
+  width: 100%;
 }
 
 /* 全局底层：黑 + 深蓝 + 上升光点（不参与交互） */
@@ -189,6 +201,22 @@ body {
     animation: none !important;
     transform: none !important;
     opacity: 0.22;
+  }
+}
+
+/* 微信 / 移动 WebView：地址栏显隐会让 vh 跳动，关键帧里用 vh 易导致背景偶发抖动；小屏关闭微粒动画并去掉 GPU 提示 */
+@media (max-width: 768px) {
+  .ambient-bg__dots--slow,
+  .ambient-bg__dots--mid,
+  .ambient-bg__dots--fast {
+    animation: none !important;
+    will-change: auto !important;
+    transform: none !important;
+    opacity: 0.2;
+  }
+
+  .home-hub__aurora {
+    animation: none !important;
   }
 }
 
@@ -3753,3 +3781,52 @@ input:focus {
     padding: 6px 10px;
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* 微信内置浏览器：滑动时 backdrop / 渐变字等偶发「缺样式」，通过根标记 + 合成层预热减轻 */
+/* main.tsx 会添加 .wechat-webview，load 后双 rAF 再添加 .wechat-paint-primed */
+/* -------------------------------------------------------------------------- */
+
+.wechat-webview #root {
+  position: relative;
+  -webkit-transform: translate3d(0, 0, 0);
+  transform: translate3d(0, 0, 0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+/* 主滚动区单独成层，减少与 fixed 背景合成冲突（勿给 .room-overlay 本身加 transform，以免 fixed 子元素参照系错乱） */
+.wechat-webview .room-scroll,
+.wechat-webview .game-screen__map-viewport,
+.wechat-webview .modal--history,
+.wechat-webview .modal--leaderboard,
+.wechat-webview .modal--rules,
+.wechat-webview .modal--skills,
+.wechat-webview .skills-guide-list,
+.wechat-webview .rules-content,
+.wechat-webview .game-screen__replay-body,
+.wechat-webview .admin-layout {
+  -webkit-transform: translate3d(0, 0, 0);
+  transform: translate3d(0, 0, 0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+/* 渐变文字 + drop-shadow 在微信里滚动易剥落，单独提升一层 */
+.wechat-webview .home-hub__title {
+  -webkit-transform: translate3d(0, 0, 0);
+  transform: translate3d(0, 0, 0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+/* 毛玻璃弹层：与滚动内容分层，降低滑动时整层透明失效概率 */
+.wechat-webview .modal:not(.modal--room-settings),
+.wechat-webview .toast-inner,
+.wechat-webview .home-hub__admin-corner {
+  -webkit-transform: translate3d(0, 0, 0);
+  transform: translate3d(0, 0, 0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
