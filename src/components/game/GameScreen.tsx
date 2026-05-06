@@ -126,6 +126,7 @@ export function GameScreen({
 }: Props) {
   const n = state.gridSize;
   const isSpectator = state.isSpectator === true || state.isEliminatedSpectator === true;
+  const pinPlayerDock = state.phase === "playing" && !isSpectator;
   const spectatorReplayEntries = useMemo(() => {
     const log = state.replayLog ?? [];
     return [...log].sort((a, b) => a.seq - b.seq);
@@ -176,6 +177,9 @@ export function GameScreen({
   const [replaySaving, setReplaySaving] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const spectatorStreamRef = useRef<HTMLDivElement>(null);
+  const fixedDockRef = useRef<HTMLDivElement>(null);
+  const [fixedDockH, setFixedDockH] = useState(0);
+  const [broadcastLiftPx, setBroadcastLiftPx] = useState(0);
   const wasMyTurnRef = useRef(false);
   const seenBeastSpawnRoundRef = useRef<number | null>(null);
   const lastDamageSeqRef = useRef<number>(-1);
@@ -187,7 +191,7 @@ export function GameScreen({
   } | null>(null);
   const dragMovedRef = useRef(false);
 
-  const mapViewportBasePx = useMapViewportBasePx();
+  const mapViewportBasePx = useMapViewportBasePx(isSpectator);
 
   /** 驱动回合倒计时与截止对齐 */
   const [, setTurnDeadlineTick] = useState(0);
@@ -207,6 +211,33 @@ export function GameScreen({
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [isSpectator, spectatorReplayEntries.length, state.phase]);
+
+  useEffect(() => {
+    if (!pinPlayerDock) setBroadcastLiftPx(0);
+  }, [pinPlayerDock]);
+
+  useLayoutEffect(() => {
+    if (!pinPlayerDock) {
+      setFixedDockH(0);
+      return;
+    }
+    const el = fixedDockRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      setFixedDockH(el.getBoundingClientRect().height);
+    });
+    ro.observe(el);
+    setFixedDockH(el.getBoundingClientRect().height);
+    return () => ro.disconnect();
+  }, [
+    pinPlayerDock,
+    state.isMyTurn,
+    skillAimPending,
+    uiMode,
+    damageNotice,
+    me?.eliminated,
+    state.phase,
+  ]);
 
   useEffect(() => {
     if (!state.isMyTurn) {
@@ -1056,8 +1087,31 @@ export function GameScreen({
     setUiMode({ t: "idle" });
   };
 
+  const onBroadcastDragStart = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    const y0 = e.clientY;
+    const lift0 = broadcastLiftPx;
+    const move = (ev: PointerEvent) => {
+      setBroadcastLiftPx(Math.max(0, Math.min(280, lift0 + (y0 - ev.clientY))));
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }, [broadcastLiftPx]);
+
+  const showFloatingBroadcast =
+    pinPlayerDock && (Boolean(damageNotice) || (!state.isMyTurn && !me?.eliminated));
+
   return (
-    <div className={`game-screen${isSpectator ? " game-screen--spectator" : ""}`}>
+    <div
+      className={`game-screen${isSpectator ? " game-screen--spectator" : ""}`}
+      style={pinPlayerDock && fixedDockH > 0 ? ({ paddingBottom: fixedDockH } as CSSProperties) : undefined}
+    >
       {playerLeftBanner && (
         <div className="game-screen__leave-banner" role="status">
           {playerLeftBanner}
@@ -1751,13 +1805,54 @@ export function GameScreen({
         </div>
       )}
 
-      <footer className="game-screen__dock">
-        {state.phase === "playing" && !isSpectator && damageNotice && (
+      {showFloatingBroadcast && (
+        <div
+          className="game-screen__broadcast-float"
+          style={
+            {
+              bottom: fixedDockH + broadcastLiftPx + 6,
+            } as CSSProperties
+          }
+        >
+          <button
+            type="button"
+            className="game-screen__broadcast-drag-handle"
+            aria-label="拖动上移播报区域"
+            onPointerDown={onBroadcastDragStart}
+          >
+            ︿ 拖动
+          </button>
+          {damageNotice ? (
+            <div className="game-screen__damage-notice" role="status">
+              {damageNotice}
+            </div>
+          ) : null}
+          {!state.isMyTurn && !me?.eliminated ? (
+            <div className="game-screen__turn-wait-panel" role="status">
+              <span>
+                当前行动：
+                <strong className={state.isBeastTurn ? "game-screen__turn--beast" : ""}>
+                  {state.isBeastTurn ? "巨兽的回合" : state.currentTurnNickname ?? "…"}
+                </strong>
+              </span>
+              <span>
+                下一位：<strong>{state.nextTurnNickname ?? "暂无"}</strong>
+              </span>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      <footer
+        ref={pinPlayerDock ? fixedDockRef : undefined}
+        className={`game-screen__dock${pinPlayerDock ? " game-screen__dock--player-fixed" : ""}`}
+      >
+        {state.phase === "playing" && !isSpectator && !pinPlayerDock && damageNotice && (
           <div className="game-screen__damage-notice" role="status">
             {damageNotice}
           </div>
         )}
-        {state.phase === "playing" && !isSpectator && !state.isMyTurn && !me?.eliminated && (
+        {state.phase === "playing" && !isSpectator && !pinPlayerDock && !state.isMyTurn && !me?.eliminated && (
           <div className="game-screen__turn-wait-panel" role="status">
             <span>
               当前行动：

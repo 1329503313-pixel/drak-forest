@@ -2018,6 +2018,50 @@ function botTryFleeUrgentDanger(g: GameSession, actorId: string): GameAction | n
   return { kind: "move", path: [step] };
 }
 
+/** 到毒圈预警环（外圈）的最小曼哈顿距离 */
+function botMinManhattanToPoisonRing(g: GameSession, col: number, row: number): number {
+  if (g.poisonWarningKeys.length === 0) return 999;
+  let d = 999;
+  for (const k of g.poisonWarningKeys) {
+    const q = parseKey(k);
+    d = Math.min(d, manhattan({ col, row }, q));
+  }
+  return d;
+}
+
+/**
+ * 尚未踩在预警格、但已靠近毒圈时，优先向环外走一步；高级难度更早反应、更积极外撤。
+ */
+function botTryPoisonRingAvoidance(
+  g: GameSession,
+  actorId: string,
+  difficulty: BotDifficulty
+): GameAction | null {
+  if (g.poisonWarningKeys.length === 0) return null;
+  const p = g.players.get(actorId);
+  if (!p || p.hp <= 0 || p.stamina < 1) return null;
+  const poison = new Set(g.poisonWarningKeys);
+  const onPoison = poison.has(cellKey(p.col, p.row));
+  const curD = botMinManhattanToPoisonRing(g, p.col, p.row);
+  const thresh = difficulty === "hard" ? 6 : difficulty === "medium" ? 4 : 2;
+  if (curD > thresh) return null;
+  const neigh = botWalkNeighbors(g, p.col, p.row);
+  if (neigh.length === 0) return null;
+  let best: { col: number; row: number } | null = null;
+  let bestD = -1;
+  for (const c of neigh) {
+    const nk = cellKey(c.col, c.row);
+    if (!onPoison && poison.has(nk)) continue;
+    const d = botMinManhattanToPoisonRing(g, c.col, c.row);
+    if (d > bestD) {
+      bestD = d;
+      best = c;
+    }
+  }
+  if (!best || bestD <= curD) return null;
+  return { kind: "move", path: [best] };
+}
+
 /** 当前不在环境灾害格上、且能打到巨兽时普攻猎兽（技能链仍可能顺带伤及巨兽） */
 function botTryAttackBeast(g: GameSession, actorId: string): GameAction | null {
   const p = g.players.get(actorId)!;
@@ -2270,6 +2314,11 @@ function chooseHardApexBotAction(g: GameSession, actorId: string): GameAction {
   const minD = botMinChebyshevToEnemies(g, actorId);
   const pressured = p.hp <= 7 && minD <= 3;
 
+  const fleeUrgent = botTryFleeUrgentDanger(g, actorId);
+  if (fleeUrgent) return fleeUrgent;
+  const fleePoison = botTryPoisonRingAvoidance(g, actorId, "hard");
+  if (fleePoison) return fleePoison;
+
   const killAtk = botTryAttack(g, actorId, (arr) => {
     const fin = arr.filter((e) => e.hp <= sessionAttackDamage(g));
     if (fin.length) return fin.sort((a, b) => a.hp - b.hp)[0];
@@ -2355,9 +2404,11 @@ export function chooseBotAction(g: GameSession, actorId: string, difficulty: Bot
   const diff = p.botDifficulty ?? difficulty;
 
   if (diff === "easy") {
-    if (Math.random() < 0.1) return { kind: "endTurn" };
     const flee = botTryFleeUrgentDanger(g, actorId);
     if (flee) return flee;
+    const poisonStep = botTryPoisonRingAvoidance(g, actorId, "easy");
+    if (poisonStep) return poisonStep;
+    if (Math.random() < 0.1) return { kind: "endTurn" };
 
     const danger = botUrgentDangerKeys(g);
     const atkLow = botTryAttack(g, actorId, (arr) => [...arr].sort((a, b) => a.hp - b.hp)[0]);
@@ -2398,6 +2449,8 @@ export function chooseBotAction(g: GameSession, actorId: string, difficulty: Bot
   if (diff === "medium") {
     const flee = botTryFleeUrgentDanger(g, actorId);
     if (flee) return flee;
+    const poisonStep = botTryPoisonRingAvoidance(g, actorId, "medium");
+    if (poisonStep) return poisonStep;
 
     const danger = botUrgentDangerKeys(g);
     const atkFinish = botTryAttack(g, actorId, (arr) => [...arr].sort((a, b) => a.hp - b.hp)[0]);

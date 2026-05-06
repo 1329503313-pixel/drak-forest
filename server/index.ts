@@ -199,6 +199,23 @@ function dissolveRoom(room: Room): void {
   }
 }
 
+/**
+ * 对战席已无真人可接任房主。
+ * 若对局仍在进行，将 hostId 挂到一名电脑（占位）以便电脑局正常结算；否则解散房间。
+ */
+function resolveHostWhenOnlyBotsInSeats(room: Room): Room | null {
+  const code = room.code;
+  if (games.has(code)) {
+    const botHost = [...room.players.keys()].find(isBotSocketId);
+    if (botHost) {
+      room.hostId = botHost;
+      return room;
+    }
+  }
+  dissolveRoom(room);
+  return null;
+}
+
 function broadcastRoom(room: Room) {
   const payload = roomPayload(room);
   for (const sid of room.players.keys()) {
@@ -275,8 +292,7 @@ function removePlayerFromRoom(socketId: string, room: Room): Room | null {
     if (nextHuman) {
       room.hostId = nextHuman;
     } else if ([...room.players.keys()].every(isBotSocketId)) {
-      dissolveRoom(room);
-      return null;
+      return resolveHostWhenOnlyBotsInSeats(room);
     }
   }
   return room;
@@ -662,6 +678,14 @@ function executeBotTurn(roomCode: string): void {
   else scheduleTurnTimer(roomCode);
 }
 
+/** 在 broadcastGameState 等可能改变当前回合者的路径之后，确保巨兽延迟或回合计时器已挂上 */
+function syncTurnTimerAfterBroadcast(roomCode: string): void {
+  const g = games.get(roomCode);
+  if (!g || g.phase !== "playing") return;
+  if (g.beastTurnPending) runBeastIfPending(roomCode);
+  else scheduleTurnTimer(roomCode);
+}
+
 function scheduleTurnTimer(roomCode: string): void {
   clearTurnTimer(roomCode);
   const g = games.get(roomCode);
@@ -672,7 +696,7 @@ function scheduleTurnTimer(roomCode: string): void {
       roomCode,
       setTimeout(() => {
         executeBotTurn(roomCode);
-      }, 400)
+      }, 3000)
     );
     return;
   }
@@ -832,6 +856,11 @@ io.on("connection", (socket) => {
       const left = eliminatePlayerFromGame(g, socket.id, { deathCause: "退出游戏" });
       if (left) io.to(code).emit("game:playerLeft", { nickname: left.nickname });
       broadcastGameState(code);
+      const gAfter = games.get(code);
+      if (gAfter?.phase === "playing") {
+        if (gAfter.beastTurnPending) runBeastIfPending(code);
+        else scheduleTurnTimer(code);
+      }
     }
     const updated = removePlayerFromRoom(socket.id, room);
     socket.leave(code);
@@ -1166,6 +1195,11 @@ io.on("connection", (socket) => {
     }
     g.retiredToLobby.add(socket.id);
     broadcastGameState(code);
+    const gAfterRetire = games.get(code);
+    if (gAfterRetire?.phase === "playing") {
+      if (gAfterRetire.beastTurnPending) runBeastIfPending(code);
+      else scheduleTurnTimer(code);
+    }
     socket.emit("game:leftToRoom", { roomCode: code });
     socket.emit("room:state", roomPayload(room));
     cb?.(null);
@@ -1415,6 +1449,11 @@ io.on("connection", (socket) => {
       const left = eliminatePlayerFromGame(gKick, targetSocketId, { deathCause: "被房主移出游戏" });
       if (left) io.to(code).emit("game:playerLeft", { nickname: left.nickname });
       broadcastGameState(code);
+      const gAfterKick = games.get(code);
+      if (gAfterKick?.phase === "playing") {
+        if (gAfterKick.beastTurnPending) runBeastIfPending(code);
+        else scheduleTurnTimer(code);
+      }
     }
     room.players.delete(targetSocketId);
     room.botDifficulties?.delete(targetSocketId);
@@ -1428,6 +1467,9 @@ io.on("connection", (socket) => {
       if (nextHuman) {
         room.hostId = nextHuman;
         broadcastRoom(room);
+      } else if ([...room.players.keys()].every(isBotSocketId)) {
+        const after = resolveHostWhenOnlyBotsInSeats(room);
+        if (after) broadcastRoom(after);
       } else {
         dissolveRoom(room);
       }
