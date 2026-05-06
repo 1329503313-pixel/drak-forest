@@ -16,7 +16,7 @@ export function AdminSpectateOverlay({ roomCode, onClose }: Props) {
     () =>
       io(import.meta.env.VITE_SOCKET_URL || undefined, {
         path: "/socket.io",
-        transports: ["websocket", "polling"],
+        transports: ["polling", "websocket"],
         autoConnect: true,
       }),
     []

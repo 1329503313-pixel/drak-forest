@@ -23,7 +23,8 @@ function useSocket(): Socket {
     const url = import.meta.env.VITE_SOCKET_URL || undefined;
     return io(url, {
       path: "/socket.io",
-      transports: ["websocket", "polling"],
+      // 微信 / 部分运营商网络对 WebSocket 首连不稳定，先走 polling 再升级，减少「无法连接服务器」
+      transports: ["polling", "websocket"],
       autoConnect: true,
     });
   }, []);
